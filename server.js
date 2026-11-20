@@ -3,6 +3,7 @@ const cors = require('cors');
 const { execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -23,11 +24,12 @@ app.post('/api/clip-projects', (req, res) => {
     const finalUrl = req.body.videoUrl || req.body.url || req.body.sourceUrl;
     if (!finalUrl) return res.status(400).json({ error: "YouTube URL is required" });
 
-    const projectId = Date.now().toString();
-    jobs[projectId] = { id: projectId, title: "New Clip", status: 'processing', createdAt: new Date().toISOString() };
+    const projectId = crypto.randomUUID();
+    const deviceId = req.headers['x-device-id'] || 'unknown-device';
+    jobs[projectId] = { id: projectId, title: "New Clip", status: 'processing', createdAt: new Date().toISOString(), deviceId };
     saveJobs();
 
-    const stateFile = path.join(__dirname, 'tmp', 'jobState.json');
+    const stateFile = path.join(__dirname, 'tmp', `state_${projectId}.json`);
     if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
 
     const worker = execFile('node', ['worker.js', finalUrl, projectId], { maxBuffer: 1024 * 1024 * 20 });
@@ -42,13 +44,17 @@ app.post('/api/clip-projects', (req, res) => {
     res.json(jobs[projectId]);
 });
 
-app.get('/api/clip-projects', (req, res) => res.json({ projects: Object.values(jobs) }));
+app.get('/api/clip-projects', (req, res) => {
+    const deviceId = req.headers['x-device-id'] || 'unknown-device';
+    const userProjects = Object.values(jobs).filter(j => j.deviceId === deviceId);
+    res.json({ projects: userProjects });
+});
 
 app.get('/api/cluster-jobs/:projectId/progress', (req, res) => {
     const job = jobs[req.params.projectId];
     if (!job) return res.status(404).json({ error: "Job not found" });
 
-    const stateFile = path.join(__dirname, 'tmp', 'jobState.json');
+    const stateFile = path.join(__dirname, 'tmp', `state_${job.id}.json`);
     let currentStage = 'downloading';
 
     if (fs.existsSync(stateFile)) {

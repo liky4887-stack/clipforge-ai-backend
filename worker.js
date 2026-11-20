@@ -27,7 +27,7 @@ const finalUrl = `https://www.youtube.com/watch?v=${videoId}`;
 const workDir = path.join(__dirname, 'tmp');
 const videoPath = path.join(workDir, `source_${projectId}.mp4`);
 const clipsDir = path.join(workDir, 'clips');
-const stateFile = path.join(workDir, 'jobState.json');
+const stateFile = path.join(workDir, `state_${projectId}.json`);
 const whisperPath = path.join(__dirname, 'whisper.cpp', 'build', 'bin', 'whisper-cli');
 const modelPath = path.join(__dirname, 'whisper.cpp', 'models', 'ggml-base.en.bin');
 
@@ -275,7 +275,7 @@ async function run() {
         updateState('failed');
         process.exit(1);
     } finally {
-        [audioPath, srtPath, assPath, rawClip, videoPath].forEach(f => {
+        [audioPath, srtPath, assPath, rawClip, videoPath, stateFile].forEach(f => {
             try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
         });
     }
