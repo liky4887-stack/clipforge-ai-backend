@@ -18,12 +18,6 @@ function extractVideoId(rawUrl) {
 }
 
 const videoId = extractVideoId(url);
-if (!videoId) {
-    console.error("❌ FATAL: Could not extract a valid video ID.");
-    process.exit(1);
-}
-console.log(`[Worker] Extracted Video ID: ${videoId}`);
-
 const finalUrl = `https://www.youtube.com/watch?v=${videoId}`;
 const workDir = path.join(__dirname, 'tmp');
 const videoPath = path.join(workDir, 'source.mp4');
@@ -35,17 +29,12 @@ const modelPath = path.join(__dirname, 'whisper.cpp', 'models', 'ggml-base.en.bi
 if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
 if (!fs.existsSync(clipsDir)) fs.mkdirSync(clipsDir, { recursive: true });
 
-// CRITICAL FIX: Clean up old files before starting
+// ONLY delete files specific to this project to prevent deleting other projects' clips
 fs.readdirSync(workDir).forEach(file => {
-    if (file !== 'clips' && file !== 'whisper.cpp') {
+    if (file.includes(projectId)) {
         try { fs.unlinkSync(path.join(workDir, file)); } catch (e) {}
     }
 });
-if (fs.existsSync(clipsDir)) {
-    fs.readdirSync(clipsDir).forEach(file => {
-        try { fs.unlinkSync(path.join(clipsDir, file)); } catch (e) {}
-    });
-}
 
 function updateState(stage) { 
     fs.writeFileSync(stateFile, JSON.stringify({ projectId, stage })); 
@@ -58,7 +47,6 @@ async function run() {
         updateState('downloading');
         console.log(`[Worker] Downloading: ${finalUrl}`);
         
-        // CRITICAL FIX: Use -f to force format and -o to set path. Do not use --remux-video.
         await execPromise('yt-dlp', [
             '--js-runtimes', 'node',
             '-f', 'bv*[height<=720]+ba/b[height<=720]',
@@ -68,7 +56,6 @@ async function run() {
         ], execOptions);
 
         updateState('analyzing');
-        console.log(`[Worker] Scraping comments for video: ${videoId}`);
         let viralTimestamp = 60; 
         try {
             const yt = await Innertube.create({ generate_session_locally: true, cache: null });
@@ -92,9 +79,7 @@ async function run() {
                 comments = await comments.getContinuation();
             }
             if (timestamps.length > 0) viralTimestamp = timestamps[0];
-        } catch (e) {
-            console.log(`[Worker] Comment scraping failed, using default.`);
-        }
+        } catch (e) {}
         
         const startTime = Math.max(0, viralTimestamp - 20);
         const rawClip = path.join(workDir, `raw_${projectId}.mp4`);
@@ -123,9 +108,7 @@ async function run() {
             const parsed = JSON.parse(aiResponse.match(/\{.*\}/s)[0]);
             clipTitle = parsed.title || clipTitle;
             clipBio = parsed.caption || clipBio;
-        } catch (e) {
-            console.log(`[Worker] ChatGPT generation failed, using defaults.`);
-        }
+        } catch (e) {}
         fs.writeFileSync(metaPath, JSON.stringify({ title: clipTitle, bio: clipBio }));
 
         updateState('rendering');
@@ -144,11 +127,8 @@ async function run() {
         });
         fs.writeFileSync(assPath, assHeader + assEvents);
 
-        // CRITICAL FIX: Correct 9:16 vertical filter using force_original_aspect_ratio
-        const filter = `[0:v]split[bg][fg];` +
-                       `[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2[bgblur];` +
-                       `[fg]scale=1080:-2:force_original_aspect_ratio=increase[fgscaled];` +
-                       `[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2,subtitles=${assPath}[v]`;
+        // STRICT 9:16 CROP & SCALE (Fills entire screen, no blur)
+        const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=${assPath}[v]`;
 
         await execPromise('ffmpeg', ['-y', '-i', rawClip, '-filter_complex', filter, '-map', '[v]', '-map', '0:a', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', finalClip], execOptions);
 
@@ -160,7 +140,6 @@ async function run() {
 
         updateState('completed');
         process.exit(0);
-
     } catch (error) {
         updateState('failed');
         console.error(`[Worker] FATAL ERROR:`, error.message);

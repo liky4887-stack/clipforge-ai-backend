@@ -8,7 +8,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const jobs = {};
+const jobsFile = path.join(__dirname, 'jobs.json');
+let jobs = {};
+
+// Load saved jobs on startup
+if (fs.existsSync(jobsFile)) {
+    try { jobs = JSON.parse(fs.readFileSync(jobsFile, 'utf8')); } catch (e) {}
+}
+
+function saveJobs() {
+    fs.writeFileSync(jobsFile, JSON.stringify(jobs, null, 2));
+}
 
 app.post('/api/clip-projects', (req, res) => {
     const finalUrl = req.body.videoUrl || req.body.url || req.body.sourceUrl;
@@ -16,6 +26,7 @@ app.post('/api/clip-projects', (req, res) => {
 
     const projectId = Date.now().toString();
     jobs[projectId] = { id: projectId, title: "New Clip", status: 'processing', createdAt: new Date().toISOString() };
+    saveJobs();
 
     const stateFile = path.join(__dirname, 'tmp', 'jobState.json');
     if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
@@ -26,6 +37,7 @@ app.post('/api/clip-projects', (req, res) => {
 
     worker.on('exit', (code) => {
         jobs[projectId].status = (code === 0) ? 'completed' : 'failed';
+        saveJobs();
     });
 
     res.json(jobs[projectId]);
@@ -69,19 +81,21 @@ app.get('/api/cluster-jobs/:projectId/progress', (req, res) => {
 
 app.get('/api/exportable-clips', (req, res) => {
     const { projectId } = req.query;
-    const job = jobs[projectId];
-    if (!job) return res.status(404).json({ error: "Job not found" });
-
+    
+    // Even if jobs object is lost, we can find the file on disk
     const clipsDir = path.join(__dirname, 'tmp', 'clips');
     let files = [];
-    if (fs.existsSync(clipsDir)) files = fs.readdirSync(clipsDir).filter(f => f.endsWith('.mp4') && f.includes(projectId));
+    if (fs.existsSync(clipsDir)) {
+        files = fs.readdirSync(clipsDir).filter(f => f.endsWith('.mp4') && f.includes(projectId));
+    }
+
+    if (files.length === 0) return res.json({ clips: [] });
 
     const clipUrls = files.map((file, index) => {
         const metaPath = path.join(clipsDir, `meta_${projectId}.json`);
         let title = "Viral Clip";
         let bio = "Check out this clip!";
         
-        // Load ChatGPT Title and Bio
         if (fs.existsSync(metaPath)) {
             try {
                 const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
