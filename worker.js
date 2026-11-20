@@ -54,6 +54,21 @@ async function hasVideoStream(filePath) {
     }
 }
 
+async function getVideoDuration(filePath) {
+    try {
+        const { stdout } = await execPromise('ffprobe', [
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filePath
+        ]);
+        const dur = parseFloat(stdout.trim());
+        return isNaN(dur) ? 0 : dur;
+    } catch (e) {
+        return 0;
+    }
+}
+
 async function run() {
     let rawClip = path.join(workDir, `raw_${projectId}.mp4`);
     let audioPath = path.join(workDir, `audio_${projectId}.wav`);
@@ -119,16 +134,32 @@ async function run() {
             console.log(`[Worker] Comment scraping skipped: ${e.message}`);
         }
         
-        const startTime = Math.max(0, viralTimestamp - 20);
+        const CLIP_LEN = 30;
+        const sourceDuration = await getVideoDuration(videoPath);
+        console.log(`[Worker] Source duration: ${sourceDuration.toFixed(1)}s`);
+
+        let startTime = Math.max(0, viralTimestamp - 20);
+        let cutLength = CLIP_LEN;
+
+        if (sourceDuration > 0) {
+            if (sourceDuration <= CLIP_LEN) {
+                startTime = 0;
+                cutLength = sourceDuration;
+            } else if (startTime + CLIP_LEN > sourceDuration) {
+                startTime = Math.max(0, sourceDuration - CLIP_LEN);
+            }
+        } else {
+            console.log(`[Worker] WARNING: Could not determine duration; using default cut`);
+        }
 
         // --- CUT RAW CLIP ---
-        console.log(`[Worker] Cutting raw clip from ${startTime}s...`);
+        console.log(`[Worker] Cutting raw clip: start=${startTime.toFixed(1)}s, length=${cutLength.toFixed(1)}s (source=${sourceDuration.toFixed(1)}s)`);
         await execPromise('ffmpeg', [
             '-y',
             '-analyzeduration', '100M', '-probesize', '100M',
             '-i', videoPath,
-            '-ss', startTime.toString(),
-            '-t', '30',
+            '-ss', startTime.toFixed(3),
+            '-t', cutLength.toFixed(3),
             '-map', '0:v:0',
             '-map', '0:a:0?',
             '-c:v', 'libx264', '-preset', 'ultrafast',
@@ -139,7 +170,8 @@ async function run() {
         // --- VERIFY RAW CLIP HAS VIDEO ---
         const rawVideoOk = await hasVideoStream(rawClip);
         if (!rawVideoOk) {
-            throw new Error("Raw clip has no video stream after cutting.");
+            const sz = fs.existsSync(rawClip) ? fs.statSync(rawClip).size : 0;
+            throw new Error(`Raw clip has no video stream after cutting (size=${sz}B, start=${startTime.toFixed(1)}s, len=${cutLength.toFixed(1)}s, source=${sourceDuration.toFixed(1)}s)`);
         }
 
         // --- STAGE 3: TRANSCRIBING ---
