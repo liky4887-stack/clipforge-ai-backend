@@ -10,3 +10,7 @@ cookie.json
 account_id.txt
 test-bridge.js
 get-token.js
+
+# Backups
+*.backup*
+
