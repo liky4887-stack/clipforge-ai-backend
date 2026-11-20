@@ -2,6 +2,7 @@ const { execFile } = require('child_process');
 const util = require('util');
 const fs = require('fs');
 const path = require('path');
+const { YoutubeCommentDownloader, SORT_BY_POPULAR } = require('youtube-comment-downloader');
 const execPromise = util.promisify(execFile);
 
 const url = process.argv[2];
@@ -33,11 +34,25 @@ const modelPath = path.join(__dirname, 'whisper.cpp', 'models', 'ggml-base.en.bi
 if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
 if (!fs.existsSync(clipsDir)) fs.mkdirSync(clipsDir, { recursive: true });
 
-function updateState(stage, extra = {}) { 
-    fs.writeFileSync(stateFile, JSON.stringify({ projectId, stage, ...extra })); 
+function updateState(stage) { 
+    fs.writeFileSync(stateFile, JSON.stringify({ projectId, stage })); 
     console.log(`[Worker] Stage: ${stage}`);
 }
 const execOptions = { maxBuffer: 1024 * 1024 * 20 };
+
+async function hasVideoStream(filePath) {
+    try {
+        const { stdout } = await execPromise('ffprobe', [
+            '-v', 'error', '-select_streams', 'v:0', 
+            '-show_entries', 'stream=codec_type', 
+            '-of', 'default=noprint_wrappers=1:nokey=1', 
+            filePath
+        ]);
+        return stdout.trim().toLowerCase().includes('video');
+    } catch (e) {
+        return false;
+    }
+}
 
 async function run() {
     let rawClip = path.join(workDir, `raw_${projectId}.mp4`);
@@ -48,74 +63,116 @@ async function run() {
     let metaPath = path.join(clipsDir, `meta_${projectId}.json`);
 
     try {
-        // --- STAGE 1: DOWNLOAD ---
+        // --- STAGE 1: DOWNLOAD (FORCE VIDEO + RETRY) ---
         updateState('downloading');
-        console.log(`[Worker] Downloading: ${finalUrl}`);
+        console.log(`[Worker] Downloading video (forcing video stream, retrying): ${finalUrl}`);
+        
+        // Use bv*[height<=720]+ba/b[height<=720] to guarantee a video stream.
+        // Add --retries and --fragment-retries to handle network truncation.
         await execPromise('yt-dlp', [
             '--js-runtimes', 'node',
+            '--ffmpeg-location', '/data/data/com.termux/files/usr/bin/ffmpeg',
             '-f', 'bv*[height<=720]+ba/b[height<=720]',
             '--merge-output-format', 'mp4',
             '--force-overwrites',
+            '--retries', '10',
+            '--fragment-retries', '10',
             '-o', videoPath,
             finalUrl
         ], execOptions);
+
+        // Verify download has a video stream
+        if (!fs.existsSync(videoPath) || fs.statSync(videoPath).size < 10000) {
+            throw new Error("Downloaded file is missing or too small.");
+        }
+        const videoOk = await hasVideoStream(videoPath);
+        if (!videoOk) {
+            throw new Error("Downloaded file does not contain a video stream (possibly audio-only).");
+        }
+        console.log(`[Worker] Download verified. Size: ${(fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)} MB`);
 
         // --- STAGE 2: ANALYZING (COMMENTS) ---
         updateState('analyzing');
         let viralTimestamp = 45; 
         try {
-            const { Innertube } = require('youtubei.js');
-            const yt = await Innertube.create({ generate_session_locally: true, cache: null });
-            let comments = await yt.getComments(videoId);
+            const downloader = new YoutubeCommentDownloader();
+            const commentsIterator = downloader.getCommentsFromUrl(finalUrl, SORT_BY_POPULAR);
+            
             let timestamps = [];
             const timeRegex = /(?:(\d{1,2}):)?(\d{1,2}):(\d{2})/g;
-            
-            for (let page = 0; page < 2; page++) {
-                for (const thread of comments.contents) {
-                    if (thread.comment) {
-                        const text = thread.comment.content.toString();
-                        let match;
-                        while ((match = timeRegex.exec(text)) !== null) {
-                            let h = 0, m = 0, s = 0;
-                            if (match[1]) { h = parseInt(match[1]); m = parseInt(match[2]); s = parseInt(match[3]); }
-                            else { m = parseInt(match[2]); s = parseInt(match[3]); }
-                            if (!isNaN(h) && !isNaN(m) && !isNaN(s)) timestamps.push((h * 3600) + (m * 60) + s);
-                        }
+            let count = 0;
+            for await (const comment of commentsIterator) {
+                if (comment.text) {
+                    let match;
+                    while ((match = timeRegex.exec(comment.text)) !== null) {
+                        let h = 0, m = 0, s = 0;
+                        if (match[1]) { h = parseInt(match[1]); m = parseInt(match[2]); s = parseInt(match[3]); }
+                        else { m = parseInt(match[2]); s = parseInt(match[3]); }
+                        if (!isNaN(h) && !isNaN(m) && !isNaN(s)) timestamps.push((h * 3600) + (m * 60) + s);
                     }
                 }
-                if (!comments.has_continuation) break;
-                try {
-                    comments = await comments.getContinuation();
-                } catch (e) {
-                    console.log(`[Worker] Stopped fetching comments: ${e.message}`);
-                    break;
-                }
+                if (++count >= 100) break;
             }
             if (timestamps.length > 0) viralTimestamp = timestamps[0];
+            console.log(`[Worker] Found ${timestamps.length} timestamps in comments.`);
         } catch (e) {
             console.log(`[Worker] Comment scraping skipped: ${e.message}`);
         }
         
         const startTime = Math.max(0, viralTimestamp - 20);
 
-        // Cut raw clip + ensure audio stream exists
-        await execPromise('ffmpeg', ['-y', '-ss', startTime.toString(), '-i', videoPath, '-t', '30', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', rawClip], execOptions);
+        // --- CUT RAW CLIP ---
+        console.log(`[Worker] Cutting raw clip from ${startTime}s...`);
+        await execPromise('ffmpeg', [
+            '-y',
+            '-analyzeduration', '100M', '-probesize', '100M',
+            '-i', videoPath,
+            '-ss', startTime.toString(),
+            '-t', '30',
+            '-map', '0:v:0',
+            '-map', '0:a:0?',
+            '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-c:a', 'aac',
+            rawClip
+        ], execOptions);
+
+        // --- VERIFY RAW CLIP HAS VIDEO ---
+        const rawVideoOk = await hasVideoStream(rawClip);
+        if (!rawVideoOk) {
+            throw new Error("Raw clip has no video stream after cutting.");
+        }
 
         // --- STAGE 3: TRANSCRIBING ---
         updateState('transcribing');
-        // Extract 16kHz mono PCM WAV required by whisper.cpp
-        await execPromise('ffmpeg', ['-y', '-i', rawClip, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', audioPath], execOptions);
         
-        // Check audio size (must be > 1KB)
-        if (!fs.existsSync(audioPath) || fs.statSync(audioPath).size < 1000) {
-            throw new Error("Extracted audio is empty or too short.");
+        const hasAudio = await execPromise('ffprobe', [
+            '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_type', '-of', 'default=noprint_wrappers=1:nokey=1', rawClip
+        ]).then(r => r.stdout.trim().toLowerCase().includes('audio')).catch(() => false);
+
+        let srtText = "";
+        
+        if (hasAudio) {
+            console.log(`[Worker] Audio stream found. Extracting for Whisper...`);
+            await execPromise('ffmpeg', [
+                '-y',
+                '-analyzeduration', '100M', '-probesize', '100M',
+                '-i', rawClip,
+                '-map', '0:a:0',
+                '-vn',
+                '-acodec', 'pcm_s16le',
+                '-ar', '16000',
+                '-ac', '1',
+                audioPath
+            ], execOptions);
+
+            if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1000) {
+                await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-osrt', '-nt', '-ml', '15'], execOptions);
+                if (fs.existsSync(srtPath)) srtText = fs.readFileSync(srtPath, 'utf8');
+            }
+        } else {
+            console.log(`[Worker] WARNING: No audio stream found. Skipping transcription.`);
         }
 
-        await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-osrt', '-nt', '-ml', '15'], execOptions);
-        
-        let srtText = "";
-        if (fs.existsSync(srtPath)) srtText = fs.readFileSync(srtPath, 'utf8');
-        
         // --- CHATGPT TITLE & BIO ---
         let clipTitle = "Viral Moment";
         let clipBio = "Check out this insane clip!";
@@ -154,7 +211,17 @@ async function run() {
         }
 
         const filter = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=${assPath}`;
-        const renderArgs = ['-y', '-i', rawClip, '-vf', filter, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', finalClip];
+        const renderArgs = [
+            '-y',
+            '-analyzeduration', '100M', '-probesize', '100M',
+            '-i', rawClip,
+            '-vf', filter,
+            '-map', '0:v:0',
+            '-map', '0:a:0?',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23',
+            '-c:a', 'aac',
+            finalClip
+        ];
         await execPromise('ffmpeg', renderArgs, execOptions);
 
         await new Promise(r => setTimeout(r, 1500));
