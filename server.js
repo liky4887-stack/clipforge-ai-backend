@@ -50,7 +50,7 @@ app.get('/api/cluster-jobs/:projectId/progress', (req, res) => {
 
     const stateFile = path.join(__dirname, 'tmp', 'jobState.json');
     let currentStage = 'downloading';
-    
+
     if (fs.existsSync(stateFile)) {
         try {
             const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
@@ -58,29 +58,51 @@ app.get('/api/cluster-jobs/:projectId/progress', (req, res) => {
         } catch (e) {}
     }
 
+    // Stage order MUST match worker.js: downloading -> analyzing -> transcribing -> rendering
     const stages = [
-        { key: 'downloading', label: 'Downloading', status: 'pending' },
+        { key: 'downloading',  label: 'Downloading', status: 'pending' },
+        { key: 'analyzing',    label: 'AI Analysis', status: 'pending' },
         { key: 'transcribing', label: 'Transcribing', status: 'pending' },
-        { key: 'analyzing', label: 'AI Analysis', status: 'pending' },
-        { key: 'rendering', label: 'Rendering', status: 'pending' }
+        { key: 'rendering',    label: 'Rendering',   status: 'pending' }
     ];
 
     let progress = 5;
-    if (currentStage === 'downloading') { stages[0].status = 'active'; progress = 25; }
-    else if (currentStage === 'transcribing') { stages[0].status = 'completed'; stages[1].status = 'active'; progress = 50; }
-    else if (currentStage === 'analyzing') { stages[0].status = 'completed'; stages[1].status = 'completed'; stages[2].status = 'active'; progress = 75; }
-    else if (currentStage === 'rendering') { stages[0].status = 'completed'; stages[1].status = 'completed'; stages[2].status = 'completed'; stages[3].status = 'active'; progress = 90; }
-    else if (currentStage === 'completed' || job.status === 'completed') { 
-        stages.forEach(s => s.status = 'completed'); 
-        progress = 100; currentStage = 'completed';
+    if (currentStage === 'downloading') {
+        stages[0].status = 'active';
+        progress = 25;
+    } else if (currentStage === 'analyzing') {
+        stages[0].status = 'completed';
+        stages[1].status = 'active';
+        progress = 50;
+    } else if (currentStage === 'transcribing') {
+        stages[0].status = 'completed';
+        stages[1].status = 'completed';
+        stages[2].status = 'active';
+        progress = 75;
+    } else if (currentStage === 'rendering') {
+        stages[0].status = 'completed';
+        stages[1].status = 'completed';
+        stages[2].status = 'completed';
+        stages[3].status = 'active';
+        progress = 90;
+    } else if (currentStage === 'completed' || job.status === 'completed') {
+        stages.forEach(s => s.status = 'completed');
+        progress = 100;
+        currentStage = 'completed';
     }
 
-    res.json({ projectId: job.id, status: currentStage === 'completed' ? 'completed' : job.status, progress, currentStage, stages });
+    res.json({
+        projectId: job.id,
+        status: currentStage === 'completed' ? 'completed' : job.status,
+        progress,
+        currentStage,
+        stages
+    });
 });
 
 app.get('/api/exportable-clips', (req, res) => {
     let { projectId } = req.query;
-    
+
     // FIX: Handle undefined projectId
     if (projectId === 'undefined' || projectId === 'null') {
         projectId = null;
@@ -102,7 +124,7 @@ app.get('/api/exportable-clips', (req, res) => {
         const metaPath = path.join(clipsDir, `meta_${projectId}.json`);
         let title = "Viral Clip";
         let bio = "Check out this clip!";
-        
+
         if (fs.existsSync(metaPath)) {
             try {
                 const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
