@@ -1,0 +1,12 @@
+node_modules/
+whisper.cpp/
+tmp/
+clips/
+*.db
+*.wav
+*.mp4
+token.txt
+cookie.json
+account_id.txt
+test-bridge.js
+get-token.js
