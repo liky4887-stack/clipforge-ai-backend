@@ -32,7 +32,12 @@ app.post('/api/clip-projects', (req, res) => {
     const stateFile = path.join(__dirname, 'tmp', `state_${projectId}.json`);
     if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
 
-    const worker = execFile('node', ['worker.js', finalUrl, projectId], { maxBuffer: 1024 * 1024 * 20 });
+    // Extract curation prefs (fallbacks to defaults if missing)
+    const aspect = req.body.renderPref?.layoutAspectRatio || '9:16';
+    const durations = req.body.curationPref?.clipDurations?.[0] || [30, 60];
+    const durationSec = Array.isArray(durations) ? durations[0] : 30;
+
+    const worker = execFile('node', ['worker.js', finalUrl, projectId, aspect, durationSec.toString()], { maxBuffer: 1024 * 1024 * 20 });
     worker.stdout.pipe(process.stdout);
     worker.stderr.pipe(process.stderr);
 
@@ -140,12 +145,12 @@ app.get('/api/exportable-clips', (req, res) => {
 
         const thumbName = `thumb_${projectId}.jpg`;
         const hasThumb = fs.existsSync(path.join(clipsDir, thumbName));
-        const thumbUrl = hasThumb ? `http://192.168.43.101:3000/clips/${thumbName}` : null;
-
+        const baseUrl = `${req.protocol}://${req.get('host')}/clips`;
+        
         return {
             id: `clip-${index}`, projectId: projectId || 'unknown', title, bio, viralityScore: 95, durationMs: 40000,
-            thumbnailUrl: thumbUrl,
-            videoUrl: `http://192.168.43.101:3000/clips/${file}`
+            thumbnailUrl: hasThumb ? `${baseUrl}/${thumbName}` : null,
+            videoUrl: `${baseUrl}/${file}`
         };
     });
     res.json({ clips: clipUrls });
@@ -155,4 +160,4 @@ app.post('/api/source-videos', (req, res) => res.json({ videoId: "mock", status:
 app.post('/api/upload-links-v2', (req, res) => res.json({ uploadUrl: "dummy" }));
 app.use('/clips', express.static(path.join(__dirname, 'tmp', 'clips')));
 
-app.listen(3000, '0.0.0.0', () => console.log(`\n🎬 API running on http://192.168.43.101:3000`));
+app.listen(3000, '0.0.0.0', () => console.log(`\n🎬 API running on port 3000`));
