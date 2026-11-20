@@ -7,6 +7,8 @@ const execPromise = util.promisify(execFile);
 
 const url = process.argv[2];
 const projectId = process.argv[3];
+const aspectRatio = process.argv[4] || '9:16';
+const clipLengthSec = parseInt(process.argv[5]) || 30;
 
 function extractVideoId(rawUrl) {
     try {
@@ -134,7 +136,7 @@ async function run() {
             console.log(`[Worker] Comment scraping skipped: ${e.message}`);
         }
         
-        const CLIP_LEN = 30;
+        const CLIP_LEN = clipLengthSec;
         const sourceDuration = await getVideoDuration(videoPath);
         console.log(`[Worker] Source duration: ${sourceDuration.toFixed(1)}s`);
 
@@ -227,7 +229,7 @@ async function run() {
         updateState('rendering');
         let assEvents = '';
         if (srtText) {
-            const assHeader = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Impact,90,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,10,10,300,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
+            const assHeader = `[Script Info]\nScriptType: v4.00+\nPlayResX: ${outW}\nPlayResY: ${outH}\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Impact,90,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,10,10,300,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
             srtText.split(/\n\s*\n/).forEach(block => {
                 const lines = block.trim().split('\n');
                 if (lines.length >= 3) {
@@ -242,7 +244,10 @@ async function run() {
             fs.writeFileSync(assPath, assHeader + assEvents);
         }
 
-        const filter = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=${assPath}`;
+        let outW = 1080, outH = 1920;
+        if (aspectRatio === '1:1') { outW = 1080; outH = 1080; }
+        else if (aspectRatio === '16:9') { outW = 1920; outH = 1080; }
+        const filter = `scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},subtitles=${assPath}`;
         const renderArgs = [
             '-y',
             '-analyzeduration', '100M', '-probesize', '100M',
