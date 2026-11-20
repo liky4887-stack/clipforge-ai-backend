@@ -11,7 +11,6 @@ app.use(express.json());
 const jobsFile = path.join(__dirname, 'jobs.json');
 let jobs = {};
 
-// Load saved jobs on startup
 if (fs.existsSync(jobsFile)) {
     try { jobs = JSON.parse(fs.readFileSync(jobsFile, 'utf8')); } catch (e) {}
 }
@@ -80,16 +79,24 @@ app.get('/api/cluster-jobs/:projectId/progress', (req, res) => {
 });
 
 app.get('/api/exportable-clips', (req, res) => {
-    const { projectId } = req.query;
+    let { projectId } = req.query;
     
-    // Even if jobs object is lost, we can find the file on disk
+    // FIX: Handle undefined projectId
+    if (projectId === 'undefined' || projectId === 'null') {
+        projectId = null;
+    }
+
     const clipsDir = path.join(__dirname, 'tmp', 'clips');
     let files = [];
     if (fs.existsSync(clipsDir)) {
-        files = fs.readdirSync(clipsDir).filter(f => f.endsWith('.mp4') && f.includes(projectId));
+        files = fs.readdirSync(clipsDir).filter(f => f.endsWith('.mp4'));
+        if (projectId) {
+            const filtered = files.filter(f => f.includes(projectId));
+            if (filtered.length > 0) {
+                files = filtered;
+            }
+        }
     }
-
-    if (files.length === 0) return res.json({ clips: [] });
 
     const clipUrls = files.map((file, index) => {
         const metaPath = path.join(clipsDir, `meta_${projectId}.json`);
@@ -104,7 +111,7 @@ app.get('/api/exportable-clips', (req, res) => {
         }
 
         return {
-            id: `clip-${index}`, projectId, title, bio, viralityScore: 95, durationMs: 40000,
+            id: `clip-${index}`, projectId: projectId || 'unknown', title, bio, viralityScore: 95, durationMs: 40000,
             thumbnailUrl: `http://192.168.43.101:3000/clips/${file}`,
             videoUrl: `http://192.168.43.101:3000/clips/${file}`
         };

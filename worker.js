@@ -29,7 +29,6 @@ const modelPath = path.join(__dirname, 'whisper.cpp', 'models', 'ggml-base.en.bi
 if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
 if (!fs.existsSync(clipsDir)) fs.mkdirSync(clipsDir, { recursive: true });
 
-// ONLY delete files specific to this project to prevent deleting other projects' clips
 fs.readdirSync(workDir).forEach(file => {
     if (file.includes(projectId)) {
         try { fs.unlinkSync(path.join(workDir, file)); } catch (e) {}
@@ -127,10 +126,10 @@ async function run() {
         });
         fs.writeFileSync(assPath, assHeader + assEvents);
 
-        // STRICT 9:16 CROP & SCALE (Fills entire screen, no blur)
-        const filter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=${assPath}[v]`;
+        // FIX: strict 9:16 crop, then overlay subtitles using -vf
+        const filter = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920`;
 
-        await execPromise('ffmpeg', ['-y', '-i', rawClip, '-filter_complex', filter, '-map', '[v]', '-map', '0:a', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', finalClip], execOptions);
+        await execPromise('ffmpeg', ['-y', '-i', rawClip, '-vf', `${filter},subtitles=${assPath}`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', finalClip], execOptions);
 
         fs.unlinkSync(audioPath);
         fs.unlinkSync(srtPath);
