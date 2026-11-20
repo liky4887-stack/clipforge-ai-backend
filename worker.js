@@ -8,25 +8,18 @@ const execPromise = util.promisify(execFile);
 const url = process.argv[2];
 const projectId = process.argv[3];
 
-// ROBUST: More reliable video ID extraction
 function extractVideoId(rawUrl) {
     try {
-        if (rawUrl.includes('youtu.be/')) {
-            return rawUrl.split('youtu.be/')[1].split('?')[0];
-        }
-        if (rawUrl.includes('youtube.com/watch')) {
-            return rawUrl.split('v=')[1].split('&')[0];
-        }
-        if (rawUrl.includes('youtube.com/shorts/')) {
-            return rawUrl.split('shorts/')[1].split('?')[0];
-        }
+        if (rawUrl.includes('youtu.be/')) return rawUrl.split('youtu.be/')[1].split('?')[0];
+        if (rawUrl.includes('youtube.com/watch')) return rawUrl.split('v=')[1].split('&')[0];
+        if (rawUrl.includes('youtube.com/shorts/')) return rawUrl.split('shorts/')[1].split('?')[0];
         return rawUrl.split('?')[0].split('/').pop();
     } catch (e) { return null; }
 }
 
 const videoId = extractVideoId(url);
 if (!videoId) {
-    console.error("❌ FATAL: Could not extract a valid video ID from the URL.");
+    console.error("❌ FATAL: Could not extract a valid video ID.");
     process.exit(1);
 }
 console.log(`[Worker] Extracted Video ID: ${videoId}`);
@@ -42,6 +35,18 @@ const modelPath = path.join(__dirname, 'whisper.cpp', 'models', 'ggml-base.en.bi
 if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
 if (!fs.existsSync(clipsDir)) fs.mkdirSync(clipsDir, { recursive: true });
 
+// CRITICAL FIX: Clean up old files before starting
+fs.readdirSync(workDir).forEach(file => {
+    if (file !== 'clips' && file !== 'whisper.cpp') {
+        try { fs.unlinkSync(path.join(workDir, file)); } catch (e) {}
+    }
+});
+if (fs.existsSync(clipsDir)) {
+    fs.readdirSync(clipsDir).forEach(file => {
+        try { fs.unlinkSync(path.join(clipsDir, file)); } catch (e) {}
+    });
+}
+
 function updateState(stage) { 
     fs.writeFileSync(stateFile, JSON.stringify({ projectId, stage })); 
     console.log(`[Worker] Stage: ${stage}`);
@@ -50,20 +55,24 @@ const execOptions = { maxBuffer: 1024 * 1024 * 20 };
 
 async function run() {
     try {
-        // --- STAGE 1: DOWNLOAD ---
         updateState('downloading');
         console.log(`[Worker] Downloading: ${finalUrl}`);
-        await execPromise('yt-dlp', ['--js-runtimes', 'node', '-f', 'bv*[height<=720]+ba/b[height<=720]', '--merge-output-format', 'mp4', '--remux-video', 'mp4', '-o', videoPath, finalUrl], execOptions);
+        
+        // CRITICAL FIX: Use -f to force format and -o to set path. Do not use --remux-video.
+        await execPromise('yt-dlp', [
+            '--js-runtimes', 'node',
+            '-f', 'bv*[height<=720]+ba/b[height<=720]',
+            '--merge-output-format', 'mp4',
+            '-o', videoPath,
+            finalUrl
+        ], execOptions);
 
-        // --- STAGE 2: AI ANALYSIS (COMMENTS) ---
         updateState('analyzing');
-        console.log(`[Worker] Scraping comments for viral moments on video: ${videoId}`);
+        console.log(`[Worker] Scraping comments for video: ${videoId}`);
         let viralTimestamp = 60; 
         try {
-            // FIX: Disable session caching to prevent using wrong video data
             const yt = await Innertube.create({ generate_session_locally: true, cache: null });
-            let comments = await yt.getComments(videoId); // Use the exact videoId
-            
+            let comments = await yt.getComments(videoId);
             let timestamps = [];
             const timeRegex = /(?:(\d{1,2}):)?(\d{1,2}):(\d{2})/g;
             for (let page = 0; page < 3; page++) {
@@ -82,12 +91,9 @@ async function run() {
                 if (!comments.has_continuation) break;
                 comments = await comments.getContinuation();
             }
-            if (timestamps.length > 0) {
-                viralTimestamp = timestamps[0];
-                console.log(`[Worker] Viral moment found: ${viralTimestamp}s`);
-            }
+            if (timestamps.length > 0) viralTimestamp = timestamps[0];
         } catch (e) {
-            console.log(`[Worker] Comment scraping failed, using default time. Error: ${e.message}`);
+            console.log(`[Worker] Comment scraping failed, using default.`);
         }
         
         const startTime = Math.max(0, viralTimestamp - 20);
@@ -100,7 +106,6 @@ async function run() {
 
         await execPromise('ffmpeg', ['-y', '-ss', startTime.toString(), '-i', videoPath, '-t', '40', '-c', 'copy', rawClip], execOptions);
         
-        // --- STAGE 3: TRANSCRIBE & AI TITLE ---
         updateState('transcribing');
         await execPromise('ffmpeg', ['-y', '-i', rawClip, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', audioPath], execOptions);
         await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-osrt', '-nt', '-ml', '15'], execOptions);
@@ -119,11 +124,10 @@ async function run() {
             clipTitle = parsed.title || clipTitle;
             clipBio = parsed.caption || clipBio;
         } catch (e) {
-            console.log(`[Worker] ChatGPT generation failed, using defaults. Error: ${e.message}`);
+            console.log(`[Worker] ChatGPT generation failed, using defaults.`);
         }
         fs.writeFileSync(metaPath, JSON.stringify({ title: clipTitle, bio: clipBio }));
 
-        // --- STAGE 4: RENDER ---
         updateState('rendering');
         const assHeader = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Impact,90,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,10,10,300,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
         let assEvents = '';
@@ -140,7 +144,12 @@ async function run() {
         });
         fs.writeFileSync(assPath, assHeader + assEvents);
 
-        const filter = `[0:v]split=2[fg][bg];[fg]crop=ih*9/16:ih,scale=1080:1920[fgcrop];[bg]scale=540:960,boxblur=10:5,scale=1080:1920[bgblur];[bgblur][fgcrop]overlay=(W-w)/2:(H-h)/2,subtitles=${assPath}[v]`;
+        // CRITICAL FIX: Correct 9:16 vertical filter using force_original_aspect_ratio
+        const filter = `[0:v]split[bg][fg];` +
+                       `[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2[bgblur];` +
+                       `[fg]scale=1080:-2:force_original_aspect_ratio=increase[fgscaled];` +
+                       `[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2,subtitles=${assPath}[v]`;
+
         await execPromise('ffmpeg', ['-y', '-i', rawClip, '-filter_complex', filter, '-map', '[v]', '-map', '0:a', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', finalClip], execOptions);
 
         fs.unlinkSync(audioPath);
