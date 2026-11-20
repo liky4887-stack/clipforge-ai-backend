@@ -71,6 +71,53 @@ async function getVideoDuration(filePath) {
     }
 }
 
+
+async function getSpeechSegments(audioPath) {
+    try {
+        const { stdout: durStr } = await execPromise('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath], execOptions);
+        const duration = parseFloat(durStr.trim());
+        
+        let stderr = '';
+        try {
+            await execPromise('ffmpeg', ['-i', audioPath, '-af', 'silencedetect=noise=-30dB:d=0.4', '-f', 'null', '-'], execOptions);
+        } catch (e) {
+            if (e.stderr) stderr = e.stderr;
+            else if (e.message && e.message.includes('silence_start')) stderr = e.message;
+        }
+
+        const silences = [];
+        let currentSilenceStart = null;
+        const lines = stderr.split('\n');
+        for (const line of lines) {
+            const startM = line.match(/silence_start: ([0-9.]+)/);
+            if (startM) currentSilenceStart = parseFloat(startM[1]);
+            
+            const endM = line.match(/silence_end: ([0-9.]+)/);
+            if (endM && currentSilenceStart !== null) {
+                silences.push({ start: currentSilenceStart, end: parseFloat(endM[1]) });
+                currentSilenceStart = null;
+            }
+        }
+        
+        const speechSegments = [];
+        let lastEnd = 0;
+        
+        for (const s of silences) {
+            if (s.start > lastEnd) {
+                speechSegments.push({ start: lastEnd, end: s.start });
+            }
+            lastEnd = s.end;
+        }
+        if (lastEnd < duration) {
+            speechSegments.push({ start: lastEnd, end: duration });
+        }
+        return speechSegments;
+    } catch (err) {
+        console.log(`[Worker] FFmpeg VAD error: ${err.message}`);
+        return [{ start: 0, end: 9999999 }];
+    }
+}
+
 async function run() {
     let rawClip = path.join(workDir, `raw_${projectId}.mp4`);
     let audioPath = path.join(workDir, `audio_${projectId}.wav`);
@@ -164,8 +211,8 @@ async function run() {
             '-t', cutLength.toFixed(3),
             '-map', '0:v:0',
             '-map', '0:a:0?',
-            '-c:v', 'libx264', '-preset', 'ultrafast',
-            '-c:a', 'aac',
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-r', '30',
+            '-c:a', 'aac', '-ar', '44100',
             rawClip
         ], execOptions);
 
@@ -200,8 +247,40 @@ async function run() {
             ], execOptions);
 
             if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1000) {
-                await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-osrt', '-nt', '-ml', '15'], execOptions);
+                await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-ojf', '-nt'], execOptions);
                 if (fs.existsSync(srtPath)) srtText = fs.readFileSync(srtPath, 'utf8');
+                // 🚀 VAD-based timing correction using FFmpeg silencedetect
+                const whisperJsonPath = `${audioPath}.json`;
+                if (fs.existsSync(whisperJsonPath)) {
+                    console.log("[Worker] 🎤 Running FFmpeg silencedetect to fix word timings...");
+                    try {
+                        const speechSegments = await getSpeechSegments(audioPath);
+                        console.log(`[Worker] VAD detected ${speechSegments.length} speech segments.`);
+
+                        const whisperData = JSON.parse(fs.readFileSync(whisperJsonPath, 'utf8'));
+                        const tokens = whisperData.transcription.flatMap(seg => seg.tokens || []);
+                        
+                        for (const token of tokens) {
+                            if (token.offsets && token.offsets.to) {
+                                const wordStart = token.offsets.from;
+                                const wordEndMs = token.offsets.to;
+                                const segment = speechSegments.find(s => s.start <= wordStart && s.end >= wordStart);
+                                if (segment) {
+                                    if (wordEndMs > segment.end * 1000) token.offsets.to = segment.end * 1000;
+                                } else {
+                                    const nextSeg = speechSegments.find(s => s.start * 1000 > wordStart);
+                                    if (nextSeg && wordEndMs > nextSeg.start * 1000) token.offsets.to = nextSeg.start * 1000;
+                                }
+                            }
+                        }
+
+                        fs.writeFileSync(whisperJsonPath, JSON.stringify(whisperData, null, 2));
+                        console.log("[Worker] ✅ Word timings clamped to VAD speech segments.");
+                    } catch (vadErr) {
+                        console.log(`[Worker] ⚠️ VAD processing failed: ${vadErr.message}`);
+                    }
+                }
+
             }
         } else {
             console.log(`[Worker] WARNING: No audio stream found. Skipping transcription.`);
@@ -227,10 +306,106 @@ async function run() {
 
         // --- STAGE 4: RENDERING ---
         updateState('rendering');
+
+        let outW = 1080, outH = 1920;
+        if (aspectRatio === '1:1') { outW = 1080; outH = 1080; }
+        else if (aspectRatio === '16:9') { outW = 1920; outH = 1080; }
         let assEvents = '';
-        if (srtText) {
+        const jsonPath = `${audioPath}.json`;
+        
+        if (fs.existsSync(jsonPath)) {
+            try {
+                const wj = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                
+                function formatTime(ms) {
+                    const h = Math.floor(ms / 3600000);
+                    const m = Math.floor((ms % 3600000) / 60000);
+                    const s = Math.floor((ms % 60000) / 1000);
+                    const cs = Math.floor((ms % 1000) / 10);
+                    return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
+                }
+
+                const segments = wj.transcription || [];
+                let allTokens = [];
+                for (const seg of segments) {
+                    for (const token of (seg.tokens || [])) {
+                        const text = token.text;
+                        if (text.startsWith('[') && text.endsWith(']')) continue;
+                        if (!text.trim()) continue;
+                        allTokens.push({ text: text.trim(), start: token.offsets.from, end: token.offsets.to });
+                    }
+                }
+
+                // Clamp timings so captions don't bleed into silence
+                for (let i = 0; i < allTokens.length; i++) {
+                    if (i < allTokens.length - 1) {
+                        const nextStart = allTokens[i + 1].start;
+                        if (allTokens[i].end > nextStart) {
+                            allTokens[i].end = nextStart;
+                        }
+                    } else {
+                        // Cap the last word to max 800ms
+                        if (allTokens[i].end - allTokens[i].start > 800) {
+                            allTokens[i].end = allTokens[i].start + 800;
+                        }
+                    }
+                    // Enforce minimum duration so it doesn't flicker
+                    if (allTokens[i].end - allTokens[i].start < 50) {
+                        allTokens[i].end = allTokens[i].start + 50;
+                    }
+                }
+
+                let currentPhrase = [];
+                let phraseStart = 0;
+                let phraseEnd = 0;
+
+                for (const w of allTokens) {
+                    if (currentPhrase.length === 0) phraseStart = w.start;
+                    currentPhrase.push(w);
+                    phraseEnd = w.end;
+
+                    let duration = phraseEnd - phraseStart;
+                    const hasPunctuation = /[.,!?]$/.test(w.text);
+
+                    if (currentPhrase.length >= 3 || duration > 2000 || hasPunctuation) {
+                        let kTags = '';
+                        for (let i = 0; i < currentPhrase.length; i++) {
+                            const cw = currentPhrase[i];
+                            const wordDur = cw.end - cw.start;
+                            const cs = Math.round(wordDur / 10);
+                            let cleanText = cw.text;
+                            if (i < currentPhrase.length - 1) cleanText += ' ';
+                            kTags += `{\kf${cs}}${cleanText}`;
+                        }
+                        const startStr = formatTime(phraseStart);
+                        const endStr = formatTime(phraseEnd);
+                        assEvents += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,${kTags}\n`;
+                        currentPhrase = [];
+                    }
+                }
+                if (currentPhrase.length > 0) {
+                    let kTags = '';
+                    for (let i = 0; i < currentPhrase.length; i++) {
+                        const cw = currentPhrase[i];
+                        const wordDur = cw.end - cw.start;
+                        const cs = Math.round(wordDur / 10);
+                        let cleanText = cw.text;
+                        if (i < currentPhrase.length - 1) cleanText += ' ';
+                        kTags += `{\kf${cs}}${cleanText}`;
+                    }
+                    const startStr = formatTime(phraseStart);
+                    const endStr = formatTime(phraseEnd);
+                    assEvents += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,${kTags}\n`;
+                }
+
+                const assHeader = `[Script Info]\nScriptType: v4.00+\nPlayResX: ${outW}\nPlayResY: ${outH}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Impact,90,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,10,10,300,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
+                fs.writeFileSync(assPath, assHeader + assEvents);
+            } catch (err) {
+                console.log(`[Worker] JSON parse error: ${err.message}`);
+            }
+        } else if (srtText) {
             const assHeader = `[Script Info]\nScriptType: v4.00+\nPlayResX: ${outW}\nPlayResY: ${outH}\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Impact,90,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,10,10,300,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-            srtText.split(/\n\s*\n/).forEach(block => {
+            srtText.split(/[\n]\s*[\n]/).forEach(block => {
                 const lines = block.trim().split('\n');
                 if (lines.length >= 3) {
                     const timeMatch = lines[1].match(/(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})/);
@@ -244,9 +419,6 @@ async function run() {
             fs.writeFileSync(assPath, assHeader + assEvents);
         }
 
-        let outW = 1080, outH = 1920;
-        if (aspectRatio === '1:1') { outW = 1080; outH = 1080; }
-        else if (aspectRatio === '16:9') { outW = 1920; outH = 1080; }
         const filter = `scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},subtitles=${assPath}`;
         const renderArgs = [
             '-y',
@@ -255,7 +427,7 @@ async function run() {
             '-vf', filter,
             '-map', '0:v:0',
             '-map', '0:a:0?',
-            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-crf', '23', '-r', '30',
             '-c:a', 'aac',
             finalClip
         ];
