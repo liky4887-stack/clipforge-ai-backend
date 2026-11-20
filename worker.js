@@ -256,6 +256,17 @@ async function run() {
         ];
         await execPromise('ffmpeg', renderArgs, execOptions);
 
+        // Generate thumbnail
+        const thumbPath = path.join(clipsDir, `thumb_${projectId}.jpg`);
+        try {
+            console.log(`[Worker] Generating thumbnail...`);
+            await execPromise('ffmpeg', [
+                '-y', '-i', finalClip, '-ss', '00:00:01', '-vframes', '1', '-q:v', '2', thumbPath
+            ], execOptions);
+        } catch (e) {
+            console.log(`[Worker] Thumbnail generation skipped: ${e.message}`);
+        }
+
         await new Promise(r => setTimeout(r, 1500));
         updateState('completed');
         process.exit(0);

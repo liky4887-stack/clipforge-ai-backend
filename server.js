@@ -132,9 +132,13 @@ app.get('/api/exportable-clips', (req, res) => {
             } catch(e) {}
         }
 
+        const thumbName = `thumb_${projectId}.jpg`;
+        const hasThumb = fs.existsSync(path.join(clipsDir, thumbName));
+        const thumbUrl = hasThumb ? `http://192.168.43.101:3000/clips/${thumbName}` : null;
+
         return {
             id: `clip-${index}`, projectId: projectId || 'unknown', title, bio, viralityScore: 95, durationMs: 40000,
-            thumbnailUrl: `http://192.168.43.101:3000/clips/${file}`,
+            thumbnailUrl: thumbUrl,
             videoUrl: `http://192.168.43.101:3000/clips/${file}`
         };
     });
