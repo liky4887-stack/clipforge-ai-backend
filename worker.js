@@ -78,7 +78,7 @@ async function getSpeechSegments(audioPath) {
 
         let stderrOutput = '';
         try {
-            const result = await execPromise('ffmpeg', ['-i', audioPath, '-af', 'silencedetect=noise=-35dB:d=0.2', '-f', 'null', '-'], execOptions);
+            const result = await execPromise('ffmpeg', ['-i', audioPath, '-af', 'silencedetect=noise=-42dB:d=0.3', '-f', 'null', '-'], execOptions);
             stderrOutput = result.stderr || '';
         } catch (e) {
             if (e.stderr) stderrOutput = e.stderr;
