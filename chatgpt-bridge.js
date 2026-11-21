@@ -2,7 +2,7 @@ const axios = require('axios');
 
 async function callChatGPT(prompt) {
     const payload = {
-        model: 'gpt-4o', // Freebie handles model routing
+        model: 'gemini-3.5-flash', // Freebie handles model routing
         messages: [{ role: 'user', content: prompt }],
         stream: false
     };

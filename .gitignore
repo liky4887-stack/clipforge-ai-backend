@@ -14,3 +14,9 @@ get-token.js
 # Backups
 *.backup*
 
+*.bak
+jobs.json
+jobs.json.*
+app/
+patch-captions.js
+*.pre-*

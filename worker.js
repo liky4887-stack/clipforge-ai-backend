@@ -158,6 +158,7 @@ async function run() {
             let count = 0;
             for await (const comment of commentsIterator) {
                 if (comment.text) {
+                    timeRegex.lastIndex = 0;
                     let match;
                     while ((match = timeRegex.exec(comment.text)) !== null) {
                         let h = 0, m = 0, s = 0;
@@ -234,7 +235,7 @@ async function run() {
                 let trimEnd = audioDuration;
                 if (speechSegments.length > 0) {
                     trimStart = Math.max(0, speechSegments[0].start - 0.1);
-                    trimEnd = Math.min(audioDuration, speechSegments[speechSegments.length - 1].end + 0.1);
+                    trimEnd = Math.min(audioDuration, speechSegments[speechSegments.length - 1].end + 0.05);
                 }
 
                 let trimmedAudioPath = audioPath;
@@ -264,6 +265,7 @@ async function run() {
                         for (const t of wseg.tokens || []) {
                             const text = t.text;
                             if (text.startsWith('[') && text.endsWith(']')) continue;
+                            if (text.startsWith('<|') && text.endsWith('|>')) continue;
                             if (!text.trim()) continue;
                             if (!t.offsets) continue;
 
@@ -276,8 +278,8 @@ async function run() {
                             for (const seg of speechSegments) {
                                 const sStart = seg.start * 1000;
                                 const sEnd = seg.end * 1000;
-                                // Allow 300ms padding at edges to keep boundary words
-                                if (wCenter >= sStart - 300 && wCenter <= sEnd + 300) {
+                                // Allow 150ms padding at edges to keep boundary words
+                                if (wCenter >= sStart - 150 && wCenter <= sEnd + 150) {
                                     bestSeg = seg;
                                     break;
                                 }
@@ -291,7 +293,10 @@ async function run() {
                             // Hard clamp to the actual FFmpeg segment
                             if (wStart < sStart) wStart = sStart;
                             if (wEnd > sEnd) wEnd = sEnd;
-                            if (wEnd <= wStart) wEnd = wStart + 60;
+                            if (wEnd <= wStart) {
+                                const wordLen = Math.max(1, text.trim().length);
+                                wEnd = wStart + Math.min(120, wordLen * 40);
+                            }
 
                             allTokens.push({ text: text.trim(), start: wStart, end: wEnd });
                         }
@@ -302,6 +307,14 @@ async function run() {
                         if (allTokens[i].end > allTokens[i + 1].start) {
                             allTokens[i].end = Math.max(allTokens[i].start + 30, allTokens[i + 1].start);
                         }
+                    }
+
+                    // ── SAFETY: no caption can outlive the video ──
+                    const rawClipDurationMs = Math.round(cutLength * 1000);
+                    for (let i = allTokens.length - 1; i >= 0; i--) {
+                        const tok = allTokens[i];
+                        if (tok.start >= rawClipDurationMs - 10) { allTokens.splice(i, 1); continue; }
+                        if (tok.end > rawClipDurationMs - 10) tok.end = rawClipDurationMs - 10;
                     }
 
                     let assEvents = '';
@@ -371,11 +384,14 @@ async function run() {
         try {
             if (plainText.length > 10) {
                 const { callChatGPT } = require('./chatgpt-bridge');
-                const prompt = `Based on this transcript, generate a viral TikTok/Shorts Title (max 50 chars) and a Caption (max 100 chars). Format as JSON: {"title": "...", "caption": "..."}\n\nTranscript: ${plainText}`;
+                const prompt = `Based on this transcript, generate a viral TikTok/Shorts title (max 50 chars) and a caption (max 100 chars). Return ONLY valid JSON with keys "title" and "caption". Both values must be real, specific content drawn from the transcript — never "..." or placeholder text, never repeating this instruction.\n\nTranscript: ${plainText}`;
                 const aiResponse = await callChatGPT(prompt);
                 const parsed = JSON.parse(aiResponse.match(/\{.*\}/s)[0]);
-                clipTitle = parsed.title || clipTitle;
-                clipBio = parsed.caption || clipBio;
+                const cleanTitle = String(parsed.title || '').trim();
+                const cleanBio = String(parsed.caption || parsed.bio || '').trim();
+                const isPlaceholder = (s) => !s || /^\.+$/.test(s) || s.toLowerCase().includes('placeholder') || s.toLowerCase().includes('your title') || s.toLowerCase().includes('caption here');
+                if (!isPlaceholder(cleanTitle)) clipTitle = cleanTitle.slice(0, 80);
+                if (!isPlaceholder(cleanBio)) clipBio = cleanBio.slice(0, 150);
             }
         } catch (e) {
             console.log(`[Worker] ChatGPT fallback used.`);

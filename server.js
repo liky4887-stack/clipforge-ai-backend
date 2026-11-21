@@ -26,7 +26,8 @@ app.post('/api/clip-projects', (req, res) => {
 
     const projectId = crypto.randomUUID();
     const deviceId = req.headers['x-device-id'] || 'unknown-device';
-    jobs[projectId] = { id: projectId, title: "New Clip", status: 'processing', createdAt: new Date().toISOString(), deviceId };
+    const projectTitle = String(req.body.uploadedVideoAttr?.title || '').trim() || 'New Clip';
+    jobs[projectId] = { id: projectId, title: projectTitle, status: 'processing', createdAt: new Date().toISOString(), deviceId };
     saveJobs();
 
     const stateFile = path.join(__dirname, 'tmp', `state_${projectId}.json`);
@@ -34,8 +35,8 @@ app.post('/api/clip-projects', (req, res) => {
 
     // Extract curation prefs (fallbacks to defaults if missing)
     const aspect = req.body.renderPref?.layoutAspectRatio || '9:16';
-    const durations = req.body.curationPref?.clipDurations?.[0] || [30, 60];
-    const durationSec = Array.isArray(durations) ? durations[0] : 30;
+    const durationArr = req.body.curationPref?.clipDurations?.[0] || [30];
+    const durationSec = Array.isArray(durationArr) && durationArr.length > 0 ? Number(durationArr[0]) : 30;
 
     const worker = execFile('node', ['worker.js', finalUrl, projectId, aspect, durationSec.toString()], { maxBuffer: 1024 * 1024 * 20 });
     worker.stdout.pipe(process.stdout);
@@ -114,21 +115,20 @@ app.get('/api/cluster-jobs/:projectId/progress', (req, res) => {
 app.get('/api/exportable-clips', (req, res) => {
     let { projectId } = req.query;
 
-    // FIX: Handle undefined projectId
-    if (projectId === 'undefined' || projectId === 'null') {
-        projectId = null;
+    if (projectId === 'undefined' || projectId === 'null' || !projectId) {
+        return res.json({ clips: [] });
+    }
+
+    const deviceId = req.headers['x-device-id'] || 'unknown-device';
+    const job = jobs[projectId];
+    if (!job || (job.deviceId && job.deviceId !== deviceId)) {
+        return res.status(404).json({ clips: [], error: 'Project not found' });
     }
 
     const clipsDir = path.join(__dirname, 'tmp', 'clips');
     let files = [];
     if (fs.existsSync(clipsDir)) {
-        files = fs.readdirSync(clipsDir).filter(f => f.endsWith('.mp4'));
-        if (projectId) {
-            const filtered = files.filter(f => f.includes(projectId));
-            if (filtered.length > 0) {
-                files = filtered;
-            }
-        }
+        files = fs.readdirSync(clipsDir).filter(f => f.endsWith('.mp4') && f.includes(projectId));
     }
 
     const clipUrls = files.map((file, index) => {
