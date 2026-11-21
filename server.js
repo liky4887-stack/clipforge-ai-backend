@@ -9,6 +9,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ── request log ──
+app.use((req, res, next) => { console.log(`[HTTP] ${req.method} ${req.path}`); next(); });
+
 const jobsFile = path.join(__dirname, 'jobs.json');
 let jobs = {};
 

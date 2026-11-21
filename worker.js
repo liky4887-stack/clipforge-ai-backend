@@ -196,8 +196,6 @@ async function run() {
         const CLIP_LEN = clipLengthSec;
         const sourceDuration = await getVideoDuration(videoPath);
         console.log(`[Worker] Source duration: ${sourceDuration.toFixed(1)}s`);
-
-        if (sourceDuration > 0) { viralTimestamp = Math.min(viralTimestamp, Math.max(0, sourceDuration - CLIP_LEN)); }
         let startTime = Math.max(0, viralTimestamp - 20);
         let cutLength = CLIP_LEN;
 
