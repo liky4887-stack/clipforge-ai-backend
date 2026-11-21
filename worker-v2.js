@@ -13,7 +13,6 @@ const durationsCsv = process.argv[5] || '30';
 const enableCaption = process.argv[6] !== '0';
 const customPrompt = process.env.CF_CUSTOM_PROMPT || '';
 const genre = process.env.CF_GENRE || 'Auto';
-const enableAutoHook = process.env.CF_ENABLE_AUTO_HOOK === '1';
 
 const durations = durationsCsv.split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
 if (durations.length === 0) durations.push(30);
@@ -152,6 +151,13 @@ function commentMoments(comments, srcDur) {
   return out;
 }
 
+// PeakCut-style caption styles
+const CAPTION_STYLES = {
+  bounce: { font: 'Impact',   size: 132, base: 'FFFFFF', active: '00F0FF', outline: 7, pop: 112, per: 3, upper: true  },
+  hype:   { font: 'Impact',   size: 152, base: 'FFFFFF', active: '3C3CFF', outline: 7, pop: 114, per: 2, upper: true  },
+  clean:  { font: 'Poppins',  size: 100, base: 'FFFFFF', active: '6BD7FF', outline: 5, pop: 106, per: 4, upper: false }
+};
+
 function assHeader() {
   let w = 1080, h = 1920;
   if (aspectRatio === '1:1') { w = 1080; h = 1080; }
@@ -164,14 +170,6 @@ function fmt(ms) {
   return `${h}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}.${cs.toString().padStart(2,'0')}`;
 }
 
-// PeakCut-style caption styles (from studio/render.py STYLES dict)
-const CAPTION_STYLES = {
-  bounce: { font: 'Impact',   size: 132, base: 'FFFFFF', active: '00F0FF', outline: 7, pop: 112, per: 3, upper: true  },
-  hype:   { font: 'Impact',   size: 152, base: 'FFFFFF', active: '3C3CFF', outline: 7, pop: 114, per: 2, upper: true  },
-  clean:  { font: 'Poppins',  size: 100, base: 'FFFFFF', active: '6BD7FF', outline: 5, pop: 106, per: 4, upper: false }
-};
-
-// Rough per-character width at the given font size (Impact ≈ 0.55em, Poppins ≈ 0.60em)
 function charWidth(font, size) {
   const em = font === 'Impact' ? 0.55 : 0.60;
   return em * size;
@@ -179,25 +177,18 @@ function charWidth(font, size) {
 
 function buildAssEvents(words, styleName) {
   if (!words.length) return '';
-
   const st = CAPTION_STYLES[styleName] || CAPTION_STYLES.bounce;
   const per = st.per;
   const size = st.size;
   const outline = st.outline;
-  const gap = charWidth(st.font, size) * 0.9 + 2 * outline + 6; // space + room for outlines
-
+  const gap = charWidth(st.font, size) * 0.9 + 2 * outline + 6; 
   let ev = '';
 
-  // Group words into chunks of `per`
   for (let g = 0; g < words.length; g += per) {
     const group = words.slice(g, g + per);
     const gStart = group[0].start;
     const gEnd = group[group.length - 1].end;
-
-    // Apply upper-case if style says so
     const texts = group.map(w => st.upper ? w.text.toUpperCase() : w.text);
-
-    // Measure total width at this size, shrink if too wide
     let sz = size;
     let total = texts.reduce((s, t) => s + t.length * charWidth(st.font, sz), 0) + gap * (texts.length - 1);
     const CAP_MAX_W = 960;
@@ -205,8 +196,6 @@ function buildAssEvents(words, styleName) {
       sz = Math.max(36, Math.round(sz * CAP_MAX_W / total));
       total = texts.reduce((s, t) => s + t.length * charWidth(st.font, sz), 0) + gap * (texts.length - 1);
     }
-
-    // Position each word from the left so nothing shifts when one pops
     let x = (1080 - total) / 2;
 
     for (let i = 0; i < group.length; i++) {
@@ -214,50 +203,37 @@ function buildAssEvents(words, styleName) {
       const t = texts[i];
       const wd = t.length * charWidth(st.font, sz);
       const cx = Math.round(x + wd / 2);
-      const cy = 1230; // caption y from PeakCut default
-
-      // Pop size: long words grow less so neighbours don't collide
+      const cy = 1230;
       const pop = Math.max(104, Math.min(st.pop, 100 + Math.floor(2200 / Math.max(wd, 1))));
-
       const pos = '\\an5\\pos(' + cx + ',' + cy + ')\\fs' + sz;
-
-      // Word timing relative to clip
+      
       const a = Math.max(gStart, w.start);
       const b = (i + 1 < group.length) ? group[i + 1].start : gEnd;
-
-      // --- 1. WAITING: group start → word start (base colour) ---
+      
       if (a - gStart >= 20) {
         ev += 'Dialogue: 1,' + fmt(gStart) + ',' + fmt(a) + ',Default,,0,0,0,,{' + pos + '\\c&H' + st.base + '&}' + t + '\n';
       }
-
-      // --- 2. BEING SAID: word start → next word start (highlight + pop animation) ---
       if (b - a >= 20) {
         ev += 'Dialogue: 2,' + fmt(a) + ',' + fmt(b) + ',Default,,0,0,0,,{' + pos + '\\c&H' + st.active + '&\\fscx94\\fscy94\\t(0,90,\\fscx' + pop + '\\fscy' + pop + ')\\t(90,200,\\fscx' + (pop - 5) + '\\fscy' + (pop - 5) + ')}' + t + '\n';
       }
-
-      // --- 3. SAID: word end → group end (base colour, size settles) ---
       if (gEnd - b >= 20) {
         ev += 'Dialogue: 1,' + fmt(b) + ',' + fmt(gEnd) + ',Default,,0,0,0,,{' + pos + '\\c&H' + st.base + '&\\fscx' + (pop - 5) + '\\fscy' + (pop - 5) + '\\t(0,90,\\fscx100\\fscy100)}' + t + '\n';
       }
-
       x += wd + gap;
     }
   }
-
   return ev;
 }
 
 async function run() {
   try {
-    // ── 1: download full source ──
     setStage('downloading');
     console.log(`[V2] Downloading ${finalUrl}`);
     await execPromise('yt-dlp', [
       '--js-runtimes', 'node',
       '--ffmpeg-location', process.env.FFMPEG_PATH || '/data/data/com.termux/files/usr/bin/ffmpeg',
       '-f', 'bv*[height<=720]+ba/b[height<=720]',
-      '--merge-output-format', 'mp4',
-      '--force-overwrites', '--retries', '10', '--fragment-retries', '10',
+      '--merge-output-format', 'mp4', '--force-overwrites', '--retries', '10', '--fragment-retries', '10',
       '-o', videoPath, finalUrl
     ], execOpts);
 
@@ -265,7 +241,6 @@ async function run() {
     const srcDur = await getDuration(videoPath);
     console.log(`[V2] Source: ${(fs.statSync(videoPath).size/1024/1024).toFixed(1)} MB, ${srcDur.toFixed(1)}s`);
 
-    // ── 2: extract full audio + transcribe full source ──
     setStage('analyzing');
     console.log('[V2] Extracting full audio...');
     await execPromise('ffmpeg', ['-y','-i',videoPath,'-vn','-acodec','pcm_s16le','-ar','16000','-ac','1',audioPath], execOpts);
@@ -273,12 +248,14 @@ async function run() {
     if (!fs.existsSync(whisperPath)) throw new Error(`whisper-cli missing: ${whisperPath}`);
     if (!fs.existsSync(modelPath)) throw new Error(`whisper model missing: ${modelPath}`);
 
-    console.log('[V2] Transcribing full source (may take minutes for long videos)...');
+    console.log('[V2] Transcribing full source...');
     await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-ojf', '-nt'], execOpts);
     const jsonPath = `${audioPath}.json`;
     if (!fs.existsSync(jsonPath)) throw new Error('Whisper did not produce JSON output');
 
     const wd = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    
+    // ✅ FIX: Extract individual words, not full sentences
     const allWords = [];
     for (const segment of (wd.transcription || [])) {
       for (const token of (segment.tokens || [])) {
@@ -293,15 +270,18 @@ async function run() {
         });
       }
     }
-    console.log(`[V2] Extracted ${allWords.length} word tokens`);
-    console.log(`[V2] Transcribed ${segments.length} segments`);
+    console.log(`[V2] Transcribed ${allWords.length} word tokens`);
 
-    // ── 3: pick moments ──
     let moments = [];
     const aiUp = await probeAI();
     console.log(`[V2] ChatGPT available: ${aiUp}`);
-    if (aiUp && segments.length > 0) {
-      try { moments = await aiSelectMoments(segments, srcDur); console.log(`[V2] AI picked ${moments.length} moments`); }
+    if (aiUp && allWords.length > 0) {
+      try { 
+        // Feed the AI sentences for context, but it returns timestamps
+        const sentences = (wd.transcription || []).map(s => ({ start: (s.offsets?.from || 0)/1000, text: s.text || '' }));
+        moments = await aiSelectMoments(sentences, srcDur); 
+        console.log(`[V2] AI picked ${moments.length} moments`); 
+      }
       catch (e) { console.log(`[V2] AI failed: ${e.message}`); }
     }
     if (moments.length < durations.length) {
@@ -314,7 +294,6 @@ async function run() {
       moments = evenDistribution(srcDur);
     }
 
-    // ── 4: render each clip ──
     setStage('rendering');
     for (let i = 0; i < Math.min(moments.length, durations.length); i++) {
       const m = moments[i];
@@ -329,7 +308,6 @@ async function run() {
       const metaPath = path.join(clipsDir, `meta_${projectId}_${i}.json`);
       const assPath = path.join(workDir, `captions_${projectId}_${i}.ass`);
 
-      // cut
       await execPromise('ffmpeg', [
         '-y','-analyzeduration','100M','-probesize','100M','-i',videoPath,
         '-ss',start.toFixed(3),'-t',dur.toFixed(3),
@@ -338,15 +316,16 @@ async function run() {
         rawClip
       ], execOpts);
 
-      // captions
       let useCap = false;
-      if (enableCaption && segments.length > 0) {
+      if (enableCaption && allWords.length > 0) {
         const wordsIn = [];
+        const startMs = start * 1000;
+        const endMs = end * 1000;
         for (const w of allWords) {
-          if (w.end < start * 1000) continue;
-          if (w.start > end * 1000) break;
-          const ss = Math.max(0, w.start - (start * 1000));
-          const ee = Math.min(dur * 1000, w.end - (start * 1000));
+          if (w.end <= startMs) continue;
+          if (w.start >= endMs) break;
+          const ss = Math.max(0, w.start - startMs);
+          const ee = Math.min(dur * 1000, w.end - startMs);
           if (ee <= ss) continue;
           wordsIn.push({ text: w.text, start: ss, end: ee });
         }
@@ -354,11 +333,10 @@ async function run() {
           const captionStyle = process.env.CF_CAPTION_STYLE || 'bounce';
           fs.writeFileSync(assPath, assHeader() + buildAssEvents(wordsIn, captionStyle));
           useCap = fs.statSync(assPath).size > 100;
-          console.log(`[V2] ${wordsIn.length} caption events`);
+          console.log(`[V2] ${wordsIn.length} caption words`);
         }
       }
 
-      // render
       let w = 1080, h = 1920;
       if (aspectRatio === '1:1') { w = 1080; h = 1080; }
       else if (aspectRatio === '16:9') { w = 1920; h = 1080; }
