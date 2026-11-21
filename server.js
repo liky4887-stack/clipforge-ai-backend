@@ -38,7 +38,7 @@ app.post('/api/clip-projects', (req, res) => {
     const durationArr = req.body.curationPref?.clipDurations?.[0] || [30];
     const durationSec = Array.isArray(durationArr) && durationArr.length > 0 ? Number(durationArr[0]) : 30;
 
-    const worker = execFile('node', ['worker.js', finalUrl, projectId, aspect, durationSec.toString()], { maxBuffer: 1024 * 1024 * 20 });
+    const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, projectId, aspect, durationSec.toString()], { maxBuffer: 1024 * 1024 * 20 });
     worker.stdout.pipe(process.stdout);
     worker.stderr.pipe(process.stderr);
 
@@ -159,5 +159,7 @@ app.get('/api/exportable-clips', (req, res) => {
 app.post('/api/source-videos', (req, res) => res.json({ videoId: "mock", status: "valid" }));
 app.post('/api/upload-links-v2', (req, res) => res.json({ uploadUrl: "dummy" }));
 app.use('/clips', express.static(path.join(__dirname, 'tmp', 'clips')));
+
+app.get('/api/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
 app.listen(3000, '0.0.0.0', () => console.log(`\n🎬 API running on port 3000`));
