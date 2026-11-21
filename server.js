@@ -33,27 +33,36 @@ app.post('/api/clip-projects', (req, res) => {
     jobs[projectId] = { id: projectId, title: projectTitle, status: 'processing', createdAt: new Date().toISOString(), deviceId };
     saveJobs();
 
-    const stateFile = path.join(__dirname, 'tmp', `state_${projectId}.json`);
-    if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
-
-    // Extract curation prefs (fallbacks to defaults if missing)
     const aspect = req.body.renderPref?.layoutAspectRatio || '9:16';
     const durationArr = req.body.curationPref?.clipDurations?.[0] || [30];
-    const durationSec = Array.isArray(durationArr) && durationArr.length > 0 ? Number(durationArr[0]) : 30;
+    const rawDurations = Array.isArray(durationArr) ? durationArr : [durationArr];
+    const durations = rawDurations.map(Number).filter(n => Number.isFinite(n) && n > 0);
+    if (durations.length === 0) durations.push(30);
 
     const enableCaption = req.body.renderPref?.enableCaption !== false;
-    const enableEmoji = req.body.renderPref?.enableEmoji === true;      // reserved (PR #5)
-    const enableWatermark = req.body.renderPref?.enableWatermark === true;  // reserved
+    const enableEmoji = req.body.renderPref?.enableEmoji === true;
+    const enableWatermark = req.body.renderPref?.enableWatermark === true;
     void enableEmoji; void enableWatermark;
 
-    const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, projectId, aspect, durationSec.toString(), enableCaption ? '1' : '0'], { maxBuffer: 1024 * 1024 * 20 });
-    worker.stdout.pipe(process.stdout);
-    worker.stderr.pipe(process.stderr);
+    let completed = 0;
+    let failed = 0;
+    for (let i = 0; i < durations.length; i++) {
+        const childId = durations.length === 1 ? projectId : projectId + '_' + i;
+        const childStateFile = path.join(__dirname, 'tmp', 'state_' + childId + '.json');
+        if (fs.existsSync(childStateFile)) fs.unlinkSync(childStateFile);
 
-    worker.on('exit', (code) => {
-        jobs[projectId].status = (code === 0) ? 'completed' : 'failed';
-        saveJobs();
-    });
+        const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, childId, aspect, durations[i].toString(), enableCaption ? '1' : '0'], { maxBuffer: 1024 * 1024 * 20 });
+        worker.stdout.pipe(process.stdout);
+        worker.stderr.pipe(process.stderr);
+
+        worker.on('exit', (code) => {
+            if (code === 0) completed++; else failed++;
+            if (completed + failed === durations.length) {
+                jobs[projectId].status = completed > 0 ? 'completed' : 'failed';
+                saveJobs();
+            }
+        });
+    }
 
     res.json(jobs[projectId]);
 });
@@ -68,17 +77,25 @@ app.get('/api/cluster-jobs/:projectId/progress', (req, res) => {
     const job = jobs[req.params.projectId];
     if (!job) return res.status(404).json({ error: "Job not found" });
 
-    const stateFile = path.join(__dirname, 'tmp', `state_${job.id}.json`);
+    const tmpDir = path.join(__dirname, 'tmp');
     let currentStage = 'downloading';
+    const stageOrder = ['downloading', 'analyzing', 'transcribing', 'rendering', 'completed', 'failed'];
 
-    if (fs.existsSync(stateFile)) {
-        try {
-            const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-            if (state.projectId === job.id) currentStage = state.stage;
-        } catch (e) {}
+    if (fs.existsSync(tmpDir)) {
+        const baseName = 'state_' + job.id;
+        const stateFiles = fs.readdirSync(tmpDir).filter(f =>
+            f === baseName + '.json' || (f.startsWith(baseName + '_') && f.endsWith('.json'))
+        );
+        for (const sf of stateFiles) {
+            try {
+                const state = JSON.parse(fs.readFileSync(path.join(tmpDir, sf), 'utf8'));
+                const idx = stageOrder.indexOf(state.stage);
+                const curIdx = stageOrder.indexOf(currentStage);
+                if (idx >= 0 && idx < curIdx) currentStage = state.stage;
+            } catch (e) {}
+        }
     }
 
-    // Stage order MUST match worker.js: downloading -> analyzing -> transcribing -> rendering
     const stages = [
         { key: 'downloading',  label: 'Downloading', status: 'pending' },
         { key: 'analyzing',    label: 'AI Analysis', status: 'pending' },
@@ -136,30 +153,38 @@ app.get('/api/exportable-clips', (req, res) => {
     const clipsDir = path.join(__dirname, 'tmp', 'clips');
     let files = [];
     if (fs.existsSync(clipsDir)) {
-        files = fs.readdirSync(clipsDir).filter(f => f.endsWith('.mp4') && f.includes(projectId));
+        files = fs.readdirSync(clipsDir).filter(f => {
+            if (!f.endsWith('.mp4')) return false;
+            if (f === 'final_' + projectId + '.mp4') return true;
+            return f.startsWith('final_' + projectId + '_');
+        }).sort();
     }
 
     const clipUrls = files.map((file, index) => {
-        const metaPath = path.join(clipsDir, `meta_${projectId}.json`);
+        let suffix = '';
+        if (file !== 'final_' + projectId + '.mp4') {
+            suffix = file.slice(('final_' + projectId + '_').length).replace('.mp4', '');
+        }
+        const metaName = suffix ? 'meta_' + projectId + '_' + suffix + '.json' : 'meta_' + projectId + '.json';
+        const thumbName = suffix ? 'thumb_' + projectId + '_' + suffix + '.jpg' : 'thumb_' + projectId + '.jpg';
+        const metaPath = path.join(clipsDir, metaName);
         let title = "Viral Clip";
-            let durationMs = 0;
+        let durationMs = 0;
         let bio = "Check out this clip!";
-
         if (fs.existsSync(metaPath)) {
             try {
                 const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-                title = meta.title || title; bio = meta.bio || bio; durationMs = Number(meta.durationMs) || 0;
-            } catch(e) {}
+                title = meta.title || title;
+                bio = meta.bio || bio;
+                durationMs = Number(meta.durationMs) || 0;
+            } catch (e) {}
         }
-
-        const thumbName = `thumb_${projectId}.jpg`;
         const hasThumb = fs.existsSync(path.join(clipsDir, thumbName));
-        const baseUrl = `${req.protocol}://${req.get('host')}/clips`;
-        
+        const baseUrl = req.protocol + '://' + req.get('host') + '/clips';
         return {
-            id: `clip-${index}`, projectId: projectId || 'unknown', title, bio, viralityScore: 95, durationMs,
-            thumbnailUrl: hasThumb ? `${baseUrl}/${thumbName}` : null,
-            videoUrl: `${baseUrl}/${file}`
+            id: 'clip-' + index, projectId: projectId || 'unknown', title, bio, viralityScore: 95, durationMs,
+            thumbnailUrl: hasThumb ? baseUrl + '/' + thumbName : null,
+            videoUrl: baseUrl + '/' + file
         };
     });
     res.json({ clips: clipUrls });
