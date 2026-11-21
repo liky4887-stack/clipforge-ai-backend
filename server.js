@@ -48,28 +48,25 @@ app.post('/api/clip-projects', (req, res) => {
     const genre = String(req.body.curationPref?.genre || 'Auto');
     const enableAutoHook = req.body.curationPref?.enableAutoHook === true;
 
-    let completed = 0;
-    let failed = 0;
-    for (let i = 0; i < durations.length; i++) {
-        const childId = durations.length === 1 ? projectId : projectId + '_' + i;
-        const childStateFile = path.join(__dirname, 'tmp', 'state_' + childId + '.json');
-        if (fs.existsSync(childStateFile)) fs.unlinkSync(childStateFile);
+    const durationsCsv = durations.join(',');
+    const childStateFile = path.join(__dirname, 'tmp', 'state_' + projectId + '.json');
+    if (fs.existsSync(childStateFile)) fs.unlinkSync(childStateFile);
 
-        const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, childId, aspect, durations[i].toString(), enableCaption ? '1' : '0', i.toString(), durations.length.toString()], {
-            maxBuffer: 1024 * 1024 * 20,
-            env: { ...process.env, CF_CUSTOM_PROMPT: customPrompt, CF_GENRE: genre, CF_ENABLE_AUTO_HOOK: enableAutoHook ? '1' : '0' }
-        });
-        worker.stdout.pipe(process.stdout);
-        worker.stderr.pipe(process.stderr);
+    console.log('[Server] Spawning worker-v2 with durations=' + durationsCsv);
+    const worker = execFile(process.execPath, [
+        path.join(__dirname, 'worker-v2.js'),
+        finalUrl, projectId, aspect, durationsCsv, enableCaption ? '1' : '0'
+    ], {
+        maxBuffer: 100 * 1024 * 1024,
+        env: { ...process.env, CF_CUSTOM_PROMPT: customPrompt, CF_GENRE: genre, CF_ENABLE_AUTO_HOOK: enableAutoHook ? '1' : '0' }
+    });
+    worker.stdout.pipe(process.stdout);
+    worker.stderr.pipe(process.stderr);
 
-        worker.on('exit', (code) => {
-            if (code === 0) completed++; else failed++;
-            if (completed + failed === durations.length) {
-                jobs[projectId].status = completed > 0 ? 'completed' : 'failed';
-                saveJobs();
-            }
-        });
-    }
+    worker.on('exit', (code) => {
+        jobs[projectId].status = (code === 0) ? 'completed' : 'failed';
+        saveJobs();
+    });
 
     res.json(jobs[projectId]);
 });
