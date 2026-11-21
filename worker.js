@@ -291,8 +291,8 @@ async function run() {
                             const sEnd = bestSeg.end * 1000;
 
                             // Hard clamp to the actual FFmpeg segment
-                            if (wStart < sStart) wStart = sStart;
-                            if (wEnd > sEnd) wEnd = sEnd;
+                            if (wStart < sStart) wStart = sStart; // only clamp start
+                            // (removed) do not clamp wEnd to segment end — Fix C caps to clip length
                             if (wEnd <= wStart) {
                                 const wordLen = Math.max(1, text.trim().length);
                                 wEnd = wStart + Math.min(120, wordLen * 40);
