@@ -249,7 +249,7 @@ async function run() {
     if (!fs.existsSync(modelPath)) throw new Error(`whisper model missing: ${modelPath}`);
 
     console.log('[V2] Transcribing full source...');
-    await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-ojf', '-nt'], execOpts);
+    await execPromise(whisperPath, ['-m', modelPath, '-f', audioPath, '-ojf', '-nt', '-dtw', 'base.en'], execOpts);
     const jsonPath = `${audioPath}.json`;
     if (!fs.existsSync(jsonPath)) throw new Error('Whisper did not produce JSON output');
 
