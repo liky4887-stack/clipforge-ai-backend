@@ -279,11 +279,21 @@ async function run() {
     if (!fs.existsSync(jsonPath)) throw new Error('Whisper did not produce JSON output');
 
     const wd = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-    const segments = (wd.transcription || []).map(s => ({
-      start: (s.offsets?.from || 0) / 1000,
-      end: (s.offsets?.to || 0) / 1000,
-      text: s.text || ''
-    })).filter(s => s.end > s.start);
+    const allWords = [];
+    for (const segment of (wd.transcription || [])) {
+      for (const token of (segment.tokens || [])) {
+        const t = token.text;
+        if (t.startsWith('[') && t.endsWith(']')) continue;
+        if (t.startsWith('<|') && t.endsWith('|>')) continue;
+        if (!t.trim()) continue;
+        allWords.push({
+          text: t.trim(),
+          start: (token.offsets?.from || 0),
+          end: (token.offsets?.to || 0)
+        });
+      }
+    }
+    console.log(`[V2] Extracted ${allWords.length} word tokens`);
     console.log(`[V2] Transcribed ${segments.length} segments`);
 
     // ── 3: pick moments ──
@@ -332,13 +342,13 @@ async function run() {
       let useCap = false;
       if (enableCaption && segments.length > 0) {
         const wordsIn = [];
-        for (const s of segments) {
-          if (s.end < start) continue;
-          if (s.start > end) break;
-          const ss = Math.max(0, s.start - start);
-          const ee = Math.min(dur, s.end - start);
+        for (const w of allWords) {
+          if (w.end < start * 1000) continue;
+          if (w.start > end * 1000) break;
+          const ss = Math.max(0, w.start - (start * 1000));
+          const ee = Math.min(dur * 1000, w.end - (start * 1000));
           if (ee <= ss) continue;
-          wordsIn.push({ text: s.text.trim(), start: ss * 1000, end: ee * 1000 });
+          wordsIn.push({ text: w.text, start: ss, end: ee });
         }
         if (wordsIn.length) {
           const captionStyle = process.env.CF_CAPTION_STYLE || 'bounce';
