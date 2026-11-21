@@ -164,32 +164,86 @@ function fmt(ms) {
   return `${h}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}.${cs.toString().padStart(2,'0')}`;
 }
 
-function buildAssEvents(words) {
-  // words: [{text, start_ms, end_ms}] relative to clip start
-  // group into phrases (8 words / 800ms gap / sentence end)
-  const phrases = [];
-  let cur = [];
-  for (const w of words) {
-    const prev = cur[cur.length - 1];
-    if (prev) {
-      const gap = w.start - prev.end;
-      const endsPunct = /[.,!?]$/.test(prev.text);
-      const dur = w.end - cur[0].start;
-      if (cur.length >= 8 || gap > 800 || (endsPunct && cur.length >= 3) || dur > 5000) {
-        phrases.push(cur); cur = [];
-      }
-    }
-    cur.push(w);
-  }
-  if (cur.length) phrases.push(cur);
+// PeakCut-style caption styles (from studio/render.py STYLES dict)
+const CAPTION_STYLES = {
+  bounce: { font: 'Impact',   size: 132, base: 'FFFFFF', active: '00F0FF', outline: 7, pop: 112, per: 3, upper: true  },
+  hype:   { font: 'Impact',   size: 152, base: 'FFFFFF', active: '3C3CFF', outline: 7, pop: 114, per: 2, upper: true  },
+  clean:  { font: 'Poppins',  size: 100, base: 'FFFFFF', active: '6BD7FF', outline: 5, pop: 106, per: 4, upper: false }
+};
+
+// Rough per-character width at the given font size (Impact ≈ 0.55em, Poppins ≈ 0.60em)
+function charWidth(font, size) {
+  const em = font === 'Impact' ? 0.55 : 0.60;
+  return em * size;
+}
+
+function buildAssEvents(words, styleName) {
+  if (!words.length) return '';
+
+  const st = CAPTION_STYLES[styleName] || CAPTION_STYLES.bounce;
+  const per = st.per;
+  const size = st.size;
+  const outline = st.outline;
+  const gap = charWidth(st.font, size) * 0.9 + 2 * outline + 6; // space + room for outlines
 
   let ev = '';
-  for (const p of phrases) {
-    const ps = p[0].start, pe = p[p.length - 1].end;
-    const base = p.map(w => w.text).join(' ');
-    ev += `Dialogue: 0,${fmt(ps)},${fmt(pe)},Default,,0,0,0,,${base}\n`;
-    for (const w of p) ev += `Dialogue: 1,${fmt(w.start)},${fmt(w.end)},Active,,0,0,0,,${w.text}\n`;
+
+  // Group words into chunks of `per`
+  for (let g = 0; g < words.length; g += per) {
+    const group = words.slice(g, g + per);
+    const gStart = group[0].start;
+    const gEnd = group[group.length - 1].end;
+
+    // Apply upper-case if style says so
+    const texts = group.map(w => st.upper ? w.text.toUpperCase() : w.text);
+
+    // Measure total width at this size, shrink if too wide
+    let sz = size;
+    let total = texts.reduce((s, t) => s + t.length * charWidth(st.font, sz), 0) + gap * (texts.length - 1);
+    const CAP_MAX_W = 960;
+    if (total > CAP_MAX_W) {
+      sz = Math.max(36, Math.round(sz * CAP_MAX_W / total));
+      total = texts.reduce((s, t) => s + t.length * charWidth(st.font, sz), 0) + gap * (texts.length - 1);
+    }
+
+    // Position each word from the left so nothing shifts when one pops
+    let x = (1080 - total) / 2;
+
+    for (let i = 0; i < group.length; i++) {
+      const w = group[i];
+      const t = texts[i];
+      const wd = t.length * charWidth(st.font, sz);
+      const cx = Math.round(x + wd / 2);
+      const cy = 1230; // caption y from PeakCut default
+
+      // Pop size: long words grow less so neighbours don't collide
+      const pop = Math.max(104, Math.min(st.pop, 100 + Math.floor(2200 / Math.max(wd, 1))));
+
+      const pos = '\\an5\\pos(' + cx + ',' + cy + ')\\fs' + sz;
+
+      // Word timing relative to clip
+      const a = Math.max(gStart, w.start);
+      const b = (i + 1 < group.length) ? group[i + 1].start : gEnd;
+
+      // --- 1. WAITING: group start → word start (base colour) ---
+      if (a - gStart >= 20) {
+        ev += 'Dialogue: 1,' + fmt(gStart) + ',' + fmt(a) + ',Default,,0,0,0,,{' + pos + '\\c&H' + st.base + '&}' + t + '\n';
+      }
+
+      // --- 2. BEING SAID: word start → next word start (highlight + pop animation) ---
+      if (b - a >= 20) {
+        ev += 'Dialogue: 2,' + fmt(a) + ',' + fmt(b) + ',Default,,0,0,0,,{' + pos + '\\c&H' + st.active + '&\\fscx94\\fscy94\\t(0,90,\\fscx' + pop + '\\fscy' + pop + ')\\t(90,200,\\fscx' + (pop - 5) + '\\fscy' + (pop - 5) + ')}' + t + '\n';
+      }
+
+      // --- 3. SAID: word end → group end (base colour, size settles) ---
+      if (gEnd - b >= 20) {
+        ev += 'Dialogue: 1,' + fmt(b) + ',' + fmt(gEnd) + ',Default,,0,0,0,,{' + pos + '\\c&H' + st.base + '&\\fscx' + (pop - 5) + '\\fscy' + (pop - 5) + '\\t(0,90,\\fscx100\\fscy100)}' + t + '\n';
+      }
+
+      x += wd + gap;
+    }
   }
+
   return ev;
 }
 
@@ -287,7 +341,8 @@ async function run() {
           wordsIn.push({ text: s.text.trim(), start: ss * 1000, end: ee * 1000 });
         }
         if (wordsIn.length) {
-          fs.writeFileSync(assPath, assHeader() + buildAssEvents(wordsIn));
+          const captionStyle = process.env.CF_CAPTION_STYLE || 'bounce';
+          fs.writeFileSync(assPath, assHeader() + buildAssEvents(wordsIn, captionStyle));
           useCap = fs.statSync(assPath).size > 100;
           console.log(`[V2] ${wordsIn.length} caption events`);
         }
