@@ -9,6 +9,7 @@ const url = process.argv[2];
 const projectId = process.argv[3];
 const aspectRatio = process.argv[4] || '9:16';
 const clipLengthSec = parseInt(process.argv[5]) || 30;
+const enableCaption = process.argv[6] !== '0';
 
 function extractVideoId(rawUrl) {
     try {
@@ -32,6 +33,17 @@ const clipsDir = path.join(workDir, 'clips');
 const stateFile = path.join(workDir, `state_${projectId}.json`);
 const whisperPath = path.join(__dirname, 'whisper.cpp', 'build', 'bin', 'whisper-cli');
 const modelPath = path.join(__dirname, 'whisper.cpp', 'models', 'ggml-base.en.bin');
+
+if (enableCaption) {
+    if (!fs.existsSync(whisperPath)) {
+        console.error(`❌ FATAL: whisper-cli missing at ${whisperPath}`);
+        process.exit(1);
+    }
+    if (!fs.existsSync(modelPath)) {
+        console.error(`❌ FATAL: whisper model missing at ${modelPath}`);
+        process.exit(1);
+    }
+}
 
 if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
 if (!fs.existsSync(clipsDir)) fs.mkdirSync(clipsDir, { recursive: true });
@@ -125,13 +137,19 @@ async function run() {
     let finalClip = path.join(clipsDir, `final_${projectId}.mp4`);
     let metaPath = path.join(clipsDir, `meta_${projectId}.json`);
 
+    function cleanup() {
+        [audioPath, path.join(workDir, `audio_${projectId}_trimmed.wav`), assPath, rawClip, videoPath].forEach(f => {
+            try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
+        });
+    }
+
     try {
         updateState('downloading');
         console.log(`[Worker] Downloading video: ${finalUrl}`);
 
         await execPromise('yt-dlp', [
             '--js-runtimes', 'node',
-            '--ffmpeg-location', '/data/data/com.termux/files/usr/bin/ffmpeg',
+            '--ffmpeg-location', process.env.FFMPEG_PATH || '/data/data/com.termux/files/usr/bin/ffmpeg',
             '-f', 'bv*[height<=720]+ba/b[height<=720]',
             '--merge-output-format', 'mp4',
             '--force-overwrites',
@@ -179,6 +197,7 @@ async function run() {
         const sourceDuration = await getVideoDuration(videoPath);
         console.log(`[Worker] Source duration: ${sourceDuration.toFixed(1)}s`);
 
+        if (sourceDuration > 0) { viralTimestamp = Math.min(viralTimestamp, Math.max(0, sourceDuration - CLIP_LEN)); }
         let startTime = Math.max(0, viralTimestamp - 20);
         let cutLength = CLIP_LEN;
 
@@ -216,7 +235,7 @@ async function run() {
 
         let plainText = "";
 
-        if (hasAudio) {
+        if (hasAudio && enableCaption) {
             console.log(`[Worker] Audio stream found. Extracting for Whisper...`);
             await execPromise('ffmpeg', [
                 '-y', '-analyzeduration', '100M', '-probesize', '100M',
@@ -404,7 +423,7 @@ async function run() {
         if (aspectRatio === '1:1') { outW = 1080; outH = 1080; }
         else if (aspectRatio === '16:9') { outW = 1920; outH = 1080; }
 
-        const useSubtitles = fs.existsSync(assPath) && fs.statSync(assPath).size > 100;
+        const useSubtitles = enableCaption && fs.existsSync(assPath) && fs.statSync(assPath).size > 100;
         const filter = useSubtitles
             ? `scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},subtitles=${assPath}`
             : `scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH}`;
@@ -422,7 +441,8 @@ async function run() {
             finalClip
         ], execOptions);
 
-        const thumbPath = path.join(clipsDir, `thumb_${projectId}.jpg`);
+        try { const _d = await getVideoDuration(finalClip); const _m = JSON.parse(fs.readFileSync(metaPath, 'utf8')); _m.durationMs = Math.round(_d * 1000); fs.writeFileSync(metaPath, JSON.stringify(_m)); } catch (e) {}
+          const thumbPath = path.join(clipsDir, `thumb_${projectId}.jpg`);
         try {
             console.log(`[Worker] Generating thumbnail...`);
             await execPromise('ffmpeg', [
@@ -432,12 +452,11 @@ async function run() {
             console.log(`[Worker] Thumbnail generation skipped: ${e.message}`);
         }
 
-        await new Promise(r => setTimeout(r, 1000));
-        updateState('completed');
-        process.exit(0);
+                updateState('completed');
+        cleanup(); process.exit(0);
     } catch (error) {
         console.error(`[Worker] FATAL ERROR:`, error.message);
-        updateState('failed');
+        updateState('failed'); cleanup();
         process.exit(1);
     } finally {
         [audioPath, path.join(workDir, `audio_${projectId}_trimmed.wav`), assPath, rawClip, videoPath, stateFile].forEach(f => {

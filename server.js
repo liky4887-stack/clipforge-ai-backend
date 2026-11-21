@@ -38,7 +38,12 @@ app.post('/api/clip-projects', (req, res) => {
     const durationArr = req.body.curationPref?.clipDurations?.[0] || [30];
     const durationSec = Array.isArray(durationArr) && durationArr.length > 0 ? Number(durationArr[0]) : 30;
 
-    const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, projectId, aspect, durationSec.toString()], { maxBuffer: 1024 * 1024 * 20 });
+    const enableCaption = req.body.renderPref?.enableCaption !== false;
+    const enableEmoji = req.body.renderPref?.enableEmoji === true;      // reserved (PR #5)
+    const enableWatermark = req.body.renderPref?.enableWatermark === true;  // reserved
+    void enableEmoji; void enableWatermark;
+
+    const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, projectId, aspect, durationSec.toString(), enableCaption ? '1' : '0'], { maxBuffer: 1024 * 1024 * 20 });
     worker.stdout.pipe(process.stdout);
     worker.stderr.pipe(process.stderr);
 
@@ -134,12 +139,13 @@ app.get('/api/exportable-clips', (req, res) => {
     const clipUrls = files.map((file, index) => {
         const metaPath = path.join(clipsDir, `meta_${projectId}.json`);
         let title = "Viral Clip";
+            let durationMs = 0;
         let bio = "Check out this clip!";
 
         if (fs.existsSync(metaPath)) {
             try {
                 const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-                title = meta.title; bio = meta.bio;
+                title = meta.title || title; bio = meta.bio || bio; durationMs = Number(meta.durationMs) || 0;
             } catch(e) {}
         }
 
@@ -148,7 +154,7 @@ app.get('/api/exportable-clips', (req, res) => {
         const baseUrl = `${req.protocol}://${req.get('host')}/clips`;
         
         return {
-            id: `clip-${index}`, projectId: projectId || 'unknown', title, bio, viralityScore: 95, durationMs: 40000,
+            id: `clip-${index}`, projectId: projectId || 'unknown', title, bio, viralityScore: 95, durationMs,
             thumbnailUrl: hasThumb ? `${baseUrl}/${thumbName}` : null,
             videoUrl: `${baseUrl}/${file}`
         };

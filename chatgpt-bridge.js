@@ -9,7 +9,7 @@ async function callChatGPT(prompt) {
 
     try {
         console.log("[ChatGPT Bridge] Sending prompt via Freebie proxy...");
-        const response = await axios.post('http://127.0.0.1:8001/v1/chat/completions', payload);
+        const response = await axios.post('http://127.0.0.1:8001/v1/chat/completions', payload, { timeout: 30000 });
         return response.data.choices[0].message.content;
     } catch (error) {
         console.error("[ChatGPT Bridge] Error:", error.message);
