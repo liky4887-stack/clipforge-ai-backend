@@ -10,6 +10,11 @@ const projectId = process.argv[3];
 const aspectRatio = process.argv[4] || '9:16';
 const clipLengthSec = parseInt(process.argv[5]) || 30;
 const enableCaption = process.argv[6] !== '0';
+const workerIndex = parseInt(process.argv[7]) || 0;
+const totalWorkers = parseInt(process.argv[8]) || 1;
+const customPrompt = process.env.CF_CUSTOM_PROMPT || '';
+const genre = process.env.CF_GENRE || 'Auto';
+const enableAutoHook = process.env.CF_ENABLE_AUTO_HOOK === '1';
 
 function extractVideoId(rawUrl) {
     try {
@@ -187,8 +192,16 @@ async function run() {
                 }
                 if (++count >= 100) break;
             }
-            if (timestamps.length > 0) viralTimestamp = timestamps[0];
-            console.log(`[Worker] Found ${timestamps.length} timestamps in comments.`);
+            if (timestamps.length > 0) {
+                const unique = [...new Set(timestamps)].sort((a, b) => a - b);
+                viralTimestamp = unique[workerIndex] !== undefined
+                    ? unique[workerIndex]
+                    : 45 + workerIndex * 60;
+                console.log(`[Worker #${workerIndex}/${totalWorkers}] ts=${viralTimestamp}s (${timestamps.length} hits, ${unique.length} unique)`);
+            } else {
+                viralTimestamp = 45 + workerIndex * 60;
+                console.log(`[Worker #${workerIndex}/${totalWorkers}] no comments — fallback ${viralTimestamp}s`);
+            }
         } catch (e) {
             console.log(`[Worker] Comment scraping skipped: ${e.message}`);
         }

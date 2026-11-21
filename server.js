@@ -44,6 +44,10 @@ app.post('/api/clip-projects', (req, res) => {
     const enableWatermark = req.body.renderPref?.enableWatermark === true;
     void enableEmoji; void enableWatermark;
 
+    const customPrompt = String(req.body.curationPref?.customPrompt || '');
+    const genre = String(req.body.curationPref?.genre || 'Auto');
+    const enableAutoHook = req.body.curationPref?.enableAutoHook === true;
+
     let completed = 0;
     let failed = 0;
     for (let i = 0; i < durations.length; i++) {
@@ -51,7 +55,10 @@ app.post('/api/clip-projects', (req, res) => {
         const childStateFile = path.join(__dirname, 'tmp', 'state_' + childId + '.json');
         if (fs.existsSync(childStateFile)) fs.unlinkSync(childStateFile);
 
-        const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, childId, aspect, durations[i].toString(), enableCaption ? '1' : '0'], { maxBuffer: 1024 * 1024 * 20 });
+        const worker = execFile(process.execPath, [path.join(__dirname, 'worker.js'), finalUrl, childId, aspect, durations[i].toString(), enableCaption ? '1' : '0', i.toString(), durations.length.toString()], {
+            maxBuffer: 1024 * 1024 * 20,
+            env: { ...process.env, CF_CUSTOM_PROMPT: customPrompt, CF_GENRE: genre, CF_ENABLE_AUTO_HOOK: enableAutoHook ? '1' : '0' }
+        });
         worker.stdout.pipe(process.stdout);
         worker.stderr.pipe(process.stderr);
 
