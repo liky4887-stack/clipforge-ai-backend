@@ -368,18 +368,14 @@ async function run() {
 
                     function emitPhrase() {
                         if (currentPhrase.length === 0) return;
-                        let kTags = '';
-                        for (let j = 0; j < currentPhrase.length; j++) {
-                            const cw = currentPhrase[j];
-                            const wordDur = cw.end - cw.start;
-                            const cs = Math.max(2, Math.round(wordDur / 10));
-                            let cleanText = cw.text;
-                            if (j < currentPhrase.length - 1) cleanText += ' ';
-                            kTags += `{${BS}kf${cs}}${cleanText}`;
+                        const phraseEnd = currentPhrase[currentPhrase.length - 1].end;
+                        // 1. Base event: whole phrase in base colour
+                        const baseText = currentPhrase.map(w => w.text).join(' ');
+                        assEvents += `Dialogue: 0,${formatTime(phraseStart)},${formatTime(phraseEnd)},Default,,0,0,0,,${baseText}\n`;
+                        // 2. Active events: one per word, highlighted colour (PeakCut approach)
+                        for (const w of currentPhrase) {
+                            assEvents += `Dialogue: 1,${formatTime(w.start)},${formatTime(w.end)},Default,,0,0,0,,{\\c&HCCCCCC&}${w.text}\n`;
                         }
-                        const startStr = formatTime(phraseStart);
-                        const endStr = formatTime(currentPhrase[currentPhrase.length - 1].end);
-                        assEvents += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,${kTags}\n`;
                         currentPhrase = [];
                     }
 
@@ -391,9 +387,9 @@ async function run() {
                             const gap = w.start - prevWord.end;
                             const endsPunct = /[.,!?]$/.test(prevWord.text);
                             const duration = w.end - currentPhrase[0].start;
-                            
-                            // Break if 4 words, gap > 350ms, punctuation + >= 2 words, or > 3.5s
-                            if (currentPhrase.length >= 4 || gap > 350 || (endsPunct && currentPhrase.length >= 2) || duration > 3500) {
+
+                            // Break on sentence ends or long pauses (8 words / 800 ms)
+                            if (currentPhrase.length >= 8 || gap > 800 || (endsPunct && currentPhrase.length >= 3) || duration > 5000) {
                                 emitPhrase();
                             }
                         }
@@ -409,6 +405,7 @@ async function run() {
                     const assHeader = `[Script Info]\nScriptType: v4.00+\nPlayResX: ${outW}\nPlayResY: ${outH}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Impact,80,&H0000FFFF,&H00CCCCCC,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,10,10,300,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
 
                     fs.writeFileSync(assPath, assHeader + assEvents);
+                    if (process.env.DEBUG_KEEP_ASS === '1') { try { fs.writeFileSync(path.join(clipsDir, 'captions_' + projectId + '.ass'), assHeader + assEvents); console.log('[Worker] ASS debug copy saved'); } catch(e) {} }
                     console.log(`[Worker] ✅ Generated ${assEvents.split('\n').filter(x => x.trim()).length} caption groups.`);
                 }
             }
