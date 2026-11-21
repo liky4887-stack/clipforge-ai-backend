@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { YoutubeCommentDownloader, SORT_BY_POPULAR } = require('youtube-comment-downloader');
 const execPromise = util.promisify(execFile);
+const { probeAI, pickTimestampWithAI } = require('./ai-curation');
 
 const url = process.argv[2];
 const projectId = process.argv[3];
@@ -172,7 +173,7 @@ async function run() {
         console.log(`[Worker] Download verified. Size: ${(fs.statSync(videoPath).size / 1024 / 1024).toFixed(1)} MB`);
 
         updateState('analyzing');
-        let viralTimestamp = 45;
+        let viralTimestamp = 45 + workerIndex * 60;
         try {
             const downloader = new YoutubeCommentDownloader();
             const commentsIterator = downloader.getCommentsFromUrl(finalUrl, SORT_BY_POPULAR);
@@ -187,13 +188,13 @@ async function run() {
                         let h = 0, m = 0, s = 0;
                         if (match[1]) { h = parseInt(match[1]); m = parseInt(match[2]); s = parseInt(match[3]); }
                         else { m = parseInt(match[2]); s = parseInt(match[3]); }
-                        if (!isNaN(h) && !isNaN(m) && !isNaN(s)) timestamps.push((h * 3600) + (m * 60) + s);
+                        if (!isNaN(h) && !isNaN(m) && !isNaN(s)) timestamps.push({ ts: (h * 3600) + (m * 60) + s, text: (comment.text || '').slice(0, 200) });
                     }
                 }
                 if (++count >= 100) break;
             }
             if (timestamps.length > 0) {
-                const unique = [...new Set(timestamps)].sort((a, b) => a - b);
+                const unique = [...new Set(timestamps.map(t => t.ts))].sort((a, b) => a - b);
                 viralTimestamp = unique[workerIndex] !== undefined
                     ? unique[workerIndex]
                     : 45 + workerIndex * 60;
@@ -206,6 +207,10 @@ async function run() {
             console.log(`[Worker] Comment scraping skipped: ${e.message}`);
         }
 
+        if (await probeAI()) {
+            viralTimestamp = await pickTimestampWithAI(timestamps, customPrompt, genre, viralTimestamp);
+        }
+        console.log(`[Worker #${workerIndex}/${totalWorkers}] FINAL ts=${viralTimestamp}s`);
         const CLIP_LEN = clipLengthSec;
         const sourceDuration = await getVideoDuration(videoPath);
         console.log(`[Worker] Source duration: ${sourceDuration.toFixed(1)}s`);
